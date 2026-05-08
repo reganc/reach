@@ -10,8 +10,14 @@ cp .env.example .env.local   # fill in NEXTAUTH_SECRET, ADMIN_EMAIL, ADMIN_PASSW
 npm run setup                # install deps + push DB schema + seed admin user
 
 # Development
-npm run dev                  # Next.js dev server on :3000 (Turbopack)
-npm run build && npm start   # production
+npm run dev                  # Next.js dev server on :3001 (Turbopack)
+npm run deploy               # production: `next build` + restart systemd unit (the only safe way to ship code)
+npm run logs                 # tail the systemd journal
+
+# IMPORTANT: never run `npm run build` alone after editing code.
+# The systemd-managed prod process keeps the previous build's chunk manifest
+# in memory; rebuilding without restarting causes ChunkLoadError / 404s on
+# /_next/static/chunks/*.js for any newly-hashed file. Always use `npm run deploy`.
 
 # Database
 npm run db:push              # sync schema to SQLite (no migrations)
