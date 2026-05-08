@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import yaml from "js-yaml"
+import { detectAppDatabases } from "./databases"
 import { runCommand } from "./exec"
 import {
   APPS_BASE_PATH,
@@ -155,7 +156,7 @@ export async function parseComposeFile(composePath: string): Promise<AppInfo | n
     })
   }
 
-  return {
+  const base: AppInfo = {
     id: makeAppId(composePath),
     name: appName,
     path: appDir,
@@ -163,7 +164,10 @@ export async function parseComposeFile(composePath: string): Promise<AppInfo | n
     services,
     ports: allPorts,
     tags: [],
+    databases: [],
   }
+  base.databases = await detectAppDatabases(base)
+  return base
 }
 
 export async function scanAppsDirectory(basePath = APPS_BASE_PATH): Promise<AppInfo[]> {

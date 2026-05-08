@@ -50,10 +50,12 @@ app.prepare().then(() => {
   })
 
   wss.on("connection", (ws: WebSocket) => {
-    const shell = os.platform() === "win32" ? "powershell.exe" : (process.env.SHELL ?? "bash")
+    const isWin = os.platform() === "win32"
+    const shell = isWin ? "powershell.exe" : (process.env.SHELL ?? "bash")
+    const shellArgs = isWin ? [] : ["-l"]
     const cwd = process.env.HOME ?? os.homedir()
 
-    const ptyProcess = pty.spawn(shell, [], {
+    const ptyProcess = pty.spawn(shell, shellArgs, {
       name: "xterm-256color",
       cols: 80,
       rows: 24,

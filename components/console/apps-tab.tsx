@@ -12,12 +12,19 @@ import {
   Search,
   Layers,
   X,
+  Database,
+  AlertCircle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { StatusDot } from "@/components/console/status-dot"
-import type { AppWithStatus } from "@/lib/console/types"
+import { formatBytes, formatRelative } from "@/lib/console/format"
+import type {
+  AppWithStatus,
+  DatabaseInfoWithSize,
+  DatabaseKind,
+} from "@/lib/console/types"
 
 type Action = "start" | "stop" | "restart"
 
@@ -28,6 +35,7 @@ export function AppsTab() {
   const [busy, setBusy] = useState<Record<string, Action | undefined>>({})
   const [filter, setFilter] = useState("")
   const [logsApp, setLogsApp] = useState<AppWithStatus | null>(null)
+  const [dbApp, setDbApp] = useState<AppWithStatus | null>(null)
 
   const fetchApps = useCallback(async (force = false) => {
     if (force) setRefreshing(true)
@@ -157,6 +165,20 @@ export function AppsTab() {
                             </a>
                           </>
                         )}
+                        {app.databases && app.databases.length > 0 && (
+                          <>
+                            <span>·</span>
+                            <button
+                              type="button"
+                              onClick={() => setDbApp(app)}
+                              className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+                              title="View databases"
+                            >
+                              <Database className="w-3 h-3" />
+                              {app.databases.length} {app.databases.length === 1 ? "db" : "dbs"}
+                            </button>
+                          </>
+                        )}
                       </div>
                     </td>
                     <td className="px-4 py-3 hidden md:table-cell">
@@ -210,6 +232,20 @@ export function AppsTab() {
                           size="icon"
                           variant="ghost"
                           className="h-7 w-7"
+                          title={
+                            app.databases && app.databases.length > 0
+                              ? `Databases (${app.databases.length})`
+                              : "No databases detected"
+                          }
+                          disabled={!app.databases || app.databases.length === 0}
+                          onClick={() => setDbApp(app)}
+                        >
+                          <Database className="w-3.5 h-3.5" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7"
                           title="Logs"
                           onClick={() => setLogsApp(app)}
                         >
@@ -226,6 +262,7 @@ export function AppsTab() {
       )}
 
       {logsApp && <LogsDrawer app={logsApp} onClose={() => setLogsApp(null)} />}
+      {dbApp && <DatabasesDrawer app={dbApp} onClose={() => setDbApp(null)} />}
     </div>
   )
 }
@@ -323,6 +360,167 @@ function LogsDrawer({ app, onClose }: { app: AppWithStatus; onClose: () => void 
         <pre className="flex-1 overflow-auto px-4 py-3 text-xs font-mono leading-relaxed text-foreground/80 whitespace-pre-wrap break-all">
           {loading ? "Loading…" : logs || "No logs"}
         </pre>
+      </div>
+    </div>
+  )
+}
+
+const DB_KIND_LABEL: Record<DatabaseKind, string> = {
+  sqlite: "SQLite",
+  postgres: "Postgres",
+  mysql: "MySQL/MariaDB",
+  mongodb: "MongoDB",
+  redis: "Redis",
+  other: "Other",
+}
+
+function DatabasesDrawer({
+  app,
+  onClose,
+}: {
+  app: AppWithStatus
+  onClose: () => void
+}) {
+  const [databases, setDatabases] = useState<DatabaseInfoWithSize[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const fetchDatabases = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/console/apps/${app.id}/databases`, {
+        cache: "no-store",
+      })
+      if (!res.ok) {
+        setError(`Failed to load databases (HTTP ${res.status})`)
+        setDatabases([])
+        return
+      }
+      const data = await res.json()
+      setDatabases(data.databases ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load")
+      setDatabases([])
+    } finally {
+      setLoading(false)
+    }
+  }, [app.id])
+
+  useEffect(() => {
+    fetchDatabases()
+  }, [fetchDatabases])
+
+  const totalSize = databases.reduce(
+    (acc, db) => acc + (db.sizeBytes ?? 0),
+    0,
+  )
+  const sizedCount = databases.filter((db) => db.sizeBytes !== null).length
+
+  return (
+    <div
+      className="fixed inset-0 z-40 bg-background/70 backdrop-blur-sm flex justify-end"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-3xl h-full bg-card border-l border-border flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 h-12 border-b border-border">
+          <div className="flex items-center gap-2.5">
+            <Database className="w-4 h-4 text-muted-foreground" />
+            <h2 className="text-sm font-medium">{app.name}</h2>
+            <span className="text-xs text-muted-foreground">databases</span>
+          </div>
+          <div className="flex items-center gap-2">
+            {!loading && databases.length > 0 && (
+              <span className="text-xs text-muted-foreground">
+                {databases.length} {databases.length === 1 ? "database" : "databases"}
+                {sizedCount > 0 && ` · ${formatBytes(totalSize)}`}
+              </span>
+            )}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={fetchDatabases}
+              disabled={loading}
+            >
+              {loading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="w-3.5 h-3.5" />
+              )}
+              Refresh
+            </Button>
+            <Button size="icon" variant="ghost" className="h-7 w-7" onClick={onClose}>
+              <X className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-auto">
+          {loading ? (
+            <div className="flex justify-center py-16">
+              <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-2 px-6 text-center">
+              <AlertCircle className="w-5 h-5 text-destructive" />
+              <p className="text-sm font-medium">Couldn&apos;t load databases</p>
+              <p className="text-xs text-muted-foreground">{error}</p>
+            </div>
+          ) : databases.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-2">
+              <p className="text-sm font-medium">No databases detected</p>
+              <p className="text-xs text-muted-foreground">
+                No SQLite files or database services found for this app.
+              </p>
+            </div>
+          ) : (
+            <ul className="divide-y divide-border">
+              {databases.map((db, idx) => (
+                <li key={`${db.location}-${idx}`} className="px-4 py-3.5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant="outline" className="font-normal">
+                          {DB_KIND_LABEL[db.kind] ?? db.kind}
+                        </Badge>
+                        {db.service && (
+                          <span className="text-xs text-muted-foreground">
+                            service: <span className="text-foreground">{db.service}</span>
+                          </span>
+                        )}
+                        <span className="text-xs text-muted-foreground capitalize">
+                          {db.locationKind === "unknown" ? "no mount" : db.locationKind}
+                        </span>
+                      </div>
+                      <p className="mt-1.5 text-xs font-mono text-foreground/80 break-all">
+                        {db.location}
+                      </p>
+                      {db.error && (
+                        <p className="mt-1 text-xs text-amber-500/90 inline-flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3" />
+                          {db.error}
+                        </p>
+                      )}
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-sm font-medium tabular-nums">
+                        {db.sizeBytes !== null ? formatBytes(db.sizeBytes) : "—"}
+                      </div>
+                      {db.lastModified && (
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          {formatRelative(db.lastModified)}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
     </div>
   )

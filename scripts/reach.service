@@ -1,0 +1,26 @@
+[Unit]
+Description=Reach app portal (Next.js)
+Documentation=https://github.com/regan/reach
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=regan
+Group=regan
+WorkingDirectory=/home/regan/apps/reach
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOST=0.0.0.0
+Environment=HOME=/home/regan
+ExecStart=/home/regan/apps/reach/scripts/start-prod.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=reach
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

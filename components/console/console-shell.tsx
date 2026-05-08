@@ -7,6 +7,7 @@ import {
   Network,
   Cpu,
   Coins,
+  Trash2,
   TerminalSquare,
   Plus,
   X,
@@ -17,9 +18,10 @@ import { AppsTab } from "@/components/console/apps-tab"
 import { PortsTab } from "@/components/console/ports-tab"
 import { ResourcesTab } from "@/components/console/resources-tab"
 import { TokensTab } from "@/components/console/tokens-tab"
+import { CleanupTab } from "@/components/console/cleanup-tab"
 import { TerminalTab } from "@/components/console/terminal-tab"
 
-type TabId = "overview" | "apps" | "ports" | "resources" | "tokens" | "terminal"
+type TabId = "overview" | "apps" | "ports" | "resources" | "tokens" | "cleanup" | "terminal"
 
 const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard className="w-4 h-4" /> },
@@ -27,6 +29,7 @@ const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
   { id: "ports", label: "Ports", icon: <Network className="w-4 h-4" /> },
   { id: "resources", label: "Resources", icon: <Cpu className="w-4 h-4" /> },
   { id: "tokens", label: "Tokens", icon: <Coins className="w-4 h-4" /> },
+  { id: "cleanup", label: "Cleanup", icon: <Trash2 className="w-4 h-4" /> },
   { id: "terminal", label: "Terminal", icon: <TerminalSquare className="w-4 h-4" /> },
 ]
 
@@ -97,6 +100,7 @@ export function ConsoleShell() {
         {tab === "ports" && <PortsTab />}
         {tab === "resources" && <ResourcesTab />}
         {tab === "tokens" && <TokensTab />}
+        {tab === "cleanup" && <CleanupTab />}
 
         {/* Terminal stays mounted once visited to preserve WebSocket sessions */}
         <div className={tab === "terminal" ? "" : "hidden"}>

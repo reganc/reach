@@ -13,6 +13,34 @@ export interface ServiceInfo {
   volumes: string[]
 }
 
+export type DatabaseKind =
+  | "sqlite"
+  | "postgres"
+  | "mysql"
+  | "mongodb"
+  | "redis"
+  | "other"
+
+export type DatabaseLocationKind = "file" | "directory" | "volume" | "unknown"
+
+export interface DatabaseInfo {
+  kind: DatabaseKind
+  location: string
+  locationKind: DatabaseLocationKind
+  service: string | null
+  volumeName: string | null
+  hostPath: string | null
+  // Path inside a Docker named volume (when the file lives in a volume the
+  // host can't read directly). Joined with the volume mount to size the file.
+  inVolumePath?: string | null
+}
+
+export interface DatabaseInfoWithSize extends DatabaseInfo {
+  sizeBytes: number | null
+  lastModified: string | null
+  error: string | null
+}
+
 export interface AppInfo {
   id: string
   name: string
@@ -21,6 +49,7 @@ export interface AppInfo {
   services: ServiceInfo[]
   ports: PortMapping[]
   tags: string[]
+  databases: DatabaseInfo[]
 }
 
 export type AppStatus = "running" | "stopped" | "partial" | "unknown"
