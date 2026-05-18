@@ -3,6 +3,10 @@ Description=Reach app portal (Next.js)
 Documentation=https://github.com/regan/reach
 After=network-online.target docker.service
 Wants=network-online.target
+# Stop restart-looping if the service can't come up (e.g. a partial .next/
+# build). 10 attempts within 300s, then systemd marks the unit failed.
+StartLimitBurst=10
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
