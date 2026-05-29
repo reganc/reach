@@ -8,19 +8,23 @@ type Status = "connecting" | "connected" | "disconnected" | "exited"
 
 interface Props {
   active: boolean
+  /** Stable id of the server-side PTY session this terminal attaches to. */
+  sessionId: string
 }
 
-export function TerminalTab({ active }: Props) {
+export function TerminalTab({ active, sessionId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const fitRef = useRef<(() => void) | null>(null)
   const [status, setStatus] = useState<Status>("connecting")
+  const [restored, setRestored] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const cleanupRef = useRef<(() => void) | null>(null)
 
   const connect = useCallback(() => {
     cleanupRef.current?.()
     setStatus("connecting")
+    setRestored(false)
 
     let mounted = true
     // Set preliminary cleanup immediately so StrictMode double-invocation cancels the in-flight init
@@ -83,7 +87,12 @@ export function TerminalTab({ active }: Props) {
       }
 
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
-      const ws = new WebSocket(`${proto}//${window.location.host}/api/terminal/ws`)
+      const params = new URLSearchParams({
+        sessionId,
+        cols: String(term.cols),
+        rows: String(term.rows),
+      })
+      const ws = new WebSocket(`${proto}//${window.location.host}/api/terminal/ws?${params}`)
       wsRef.current = ws
 
       ws.onopen = () => {
@@ -97,7 +106,12 @@ export function TerminalTab({ active }: Props) {
         try {
           const msg = JSON.parse(e.data)
           if (msg.type === "output") term.write(msg.data)
+          else if (msg.type === "attached") {
+            setStatus("connected")
+            setRestored(Boolean(msg.restored))
+          }
           else if (msg.type === "exit") setStatus("exited")
+          else if (msg.type === "error") setStatus("disconnected")
         } catch { /* ignore */ }
       }
 
@@ -143,7 +157,7 @@ export function TerminalTab({ active }: Props) {
     }
 
     init()
-  }, [])
+  }, [sessionId])
 
   useEffect(() => {
     connect()
@@ -182,7 +196,12 @@ export function TerminalTab({ active }: Props) {
       <div className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 bg-zinc-950 shrink-0">
         <div className="flex items-center gap-1.5">
           <div className={cn("w-2.5 h-2.5 rounded-full", statusColor[status])} />
-          <span className="text-xs text-zinc-400">{statusLabel[status]}</span>
+          <span className="text-xs text-zinc-400">
+            {statusLabel[status]}
+            {status === "connected" && restored && (
+              <span className="text-zinc-600"> · session restored</span>
+            )}
+          </span>
         </div>
 
         <div className="flex-1 text-center text-xs text-zinc-600 font-mono">bash</div>

@@ -1,0 +1,24 @@
+[Unit]
+Description=Reach persistent terminal tmux server
+Documentation=https://github.com/regan/reach
+# Owns the tmux server that backs the console terminals. Kept as a separate
+# unit (own cgroup) so reach.service can restart/deploy without killing the
+# running shells. reach.service Wants= + After= this unit.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# oneshot + RemainAfterExit: start-server daemonizes and the launcher exits, but
+# the unit stays "active" so systemd keeps the cgroup (and the tmux server) alive.
+Type=oneshot
+RemainAfterExit=yes
+User=regan
+Group=regan
+Environment=HOME=/home/regan
+Environment=REACH_TMUX_SOCKET=/home/regan/.reach-tmux.sock
+ExecStart=/home/regan/apps/reach/scripts/reach-tmux-start.sh
+ExecStop=/usr/bin/tmux -S /home/regan/.reach-tmux.sock kill-server
+TimeoutStartSec=15
+
+[Install]
+WantedBy=multi-user.target

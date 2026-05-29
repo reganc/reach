@@ -1,8 +1,12 @@
 [Unit]
 Description=Reach app portal (Next.js)
 Documentation=https://github.com/regan/reach
-After=network-online.target docker.service
+After=network-online.target docker.service reach-tmux.service
 Wants=network-online.target
+# Persistent tmux server that backs the console terminals. Wants= (not
+# Requires=/PartOf=) so restarting or stopping reach never takes the terminal
+# server — and the running shells — down with it.
+Wants=reach-tmux.service
 # Stop restart-looping if the service can't come up (e.g. a partial .next/
 # build). 10 attempts within 300s, then systemd marks the unit failed.
 StartLimitBurst=10

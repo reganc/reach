@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import {
   LayoutDashboard,
   Boxes,
@@ -34,37 +34,143 @@ const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
 ]
 
 interface TerminalSession {
-  id: number
+  id: string
   label: string
 }
 
-let sessionCounter = 1
+interface ShellState {
+  sessions: TerminalSession[]
+  activeSessionId: string
+}
+
+const STORAGE_KEY = "reach.console.terminals.v1"
+
+/** UUID with a fallback for non-secure contexts (plain-http LAN access). */
+function genId(): string {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID()
+  } catch {
+    /* fall through to the manual generator */
+  }
+  return `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function freshState(): ShellState {
+  const id = genId()
+  return { sessions: [{ id, label: "bash" }], activeSessionId: id }
+}
+
+/**
+ * Session ids are persisted so that navigating off /console and back reconnects
+ * to the same live shells (the server keeps the PTYs running). sessionStorage
+ * survives client-side route changes; the server-side idle reaper handles tabs
+ * that are abandoned for good.
+ */
+function loadState(): ShellState {
+  if (typeof window === "undefined") return freshState()
+  try {
+    const raw = window.sessionStorage.getItem(STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<ShellState>
+      if (Array.isArray(parsed.sessions) && parsed.sessions.length > 0) {
+        const sessions = parsed.sessions.filter(
+          (s): s is TerminalSession => typeof s?.id === "string",
+        )
+        if (sessions.length > 0) {
+          const active = sessions.some((s) => s.id === parsed.activeSessionId)
+            ? (parsed.activeSessionId as string)
+            : sessions[0].id
+          return { sessions, activeSessionId: active }
+        }
+      }
+    }
+  } catch {
+    /* ignore corrupt storage */
+  }
+  return freshState()
+}
 
 export function ConsoleShell() {
   const [tab, setTab] = useState<TabId>("overview")
   const [visited, setVisited] = useState<Set<TabId>>(new Set(["overview"]))
-  const [sessions, setSessions] = useState<TerminalSession[]>([{ id: sessionCounter, label: "bash" }])
-  const [activeSessionId, setActiveSessionId] = useState<number>(sessionCounter)
+  const [{ sessions, activeSessionId }, setState] = useState<ShellState>(loadState)
+
+  // Persist the tab strip so it can be rebuilt after navigating away and back.
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ sessions, activeSessionId }))
+    } catch {
+      /* storage disabled or over quota — non-fatal */
+    }
+  }, [sessions, activeSessionId])
+
+  // Discover live server-side sessions this client doesn't know about (e.g. a
+  // shell left running before sessionStorage was cleared) and surface them as
+  // tabs. Purely additive — never prunes freshly-created local sessions.
+  useEffect(() => {
+    let cancelled = false
+    fetch("/api/terminal/sessions")
+      .then((r) => (r.ok ? r.json() : { sessions: [] }))
+      .then((data: { sessions?: { id: string; alive: boolean }[] }) => {
+        if (cancelled) return
+        const live = (data.sessions ?? []).filter((s) => s.alive).map((s) => s.id)
+        setState((prev) => {
+          const known = new Set(prev.sessions.map((s) => s.id))
+          const discovered = live
+            .filter((id) => !known.has(id))
+            .map((id) => ({ id, label: "bash" }))
+          if (discovered.length === 0) return prev
+          return { ...prev, sessions: [...prev.sessions, ...discovered] }
+        })
+      })
+      .catch(() => {
+        /* no server session list available — keep local tabs as-is */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const addSession = useCallback(() => {
-    sessionCounter += 1
-    const id = sessionCounter
-    setSessions((prev) => [...prev, { id, label: "bash" }])
-    setActiveSessionId(id)
-  }, [])
-
-  const closeSession = useCallback((id: number) => {
-    setSessions((prev) => {
-      if (prev.length === 1) return prev
-      const next = prev.filter((s) => s.id !== id)
-      setActiveSessionId((current) => {
-        if (current !== id) return current
-        const idx = prev.findIndex((s) => s.id === id)
-        return next[Math.min(idx, next.length - 1)].id
-      })
-      return next
+    setState((prev) => {
+      const id = genId()
+      return { sessions: [...prev.sessions, { id, label: "bash" }], activeSessionId: id }
     })
   }, [])
+
+  const setActiveSessionId = useCallback((id: string) => {
+    setState((prev) => (prev.activeSessionId === id ? prev : { ...prev, activeSessionId: id }))
+  }, [])
+
+  const closeSession = useCallback(
+    (id: string) => {
+      let didRemove = false
+      setState((prev) => {
+        if (prev.sessions.length <= 1) return prev // always keep one terminal
+        const next = prev.sessions.filter((s) => s.id !== id)
+        if (next.length === prev.sessions.length) return prev
+        didRemove = true
+        let active = prev.activeSessionId
+        if (active === id) {
+          const idx = prev.sessions.findIndex((s) => s.id === id)
+          active = next[Math.min(idx, next.length - 1)].id
+        }
+        return { sessions: next, activeSessionId: active }
+      })
+      // Closing a tab is the only explicit kill — navigation merely detaches.
+      // Guarded by didRemove so we never kill the shell we kept open.
+      if (didRemove) {
+        void fetch("/api/terminal/kill", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: id }),
+        }).catch(() => {
+          /* best-effort; the idle reaper will reclaim it otherwise */
+        })
+      }
+    },
+    [],
+  )
 
   return (
     <>
@@ -146,7 +252,7 @@ export function ConsoleShell() {
             {/* Terminal instances — keep all mounted to preserve sessions */}
             {sessions.map((session) => (
               <div key={session.id} className={session.id === activeSessionId ? "" : "hidden"}>
-                <TerminalTab active={session.id === activeSessionId} />
+                <TerminalTab active={session.id === activeSessionId} sessionId={session.id} />
               </div>
             ))}
           </div>}
