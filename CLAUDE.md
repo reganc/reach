@@ -167,3 +167,32 @@ The result should feel:
 - Expensive
 - Effortless
 - Obvious in retrospect
+
+---
+
+## LLM call sites (agentic-patterns standard)
+
+Tracked per `~/.claude/rules/common/agentic-patterns.md`'s decision framework.
+
+| Call site | Stakes | Sync/async | Pattern | Why |
+|---|---|---|---|---|
+| App purpose summaries (`lib/insights/summaries.ts::summarizeApp`) | advisory descriptive text shown in `/insights`, cached | async (admin-triggered, `POST /api/console/insights/summarize`, up to 180s) | single shot | Lane B (raw Ollama, JSON mode) per `~/apps/CLAUDE.md`. Content-hash cached — only regenerates when a project's README/CLAUDE.md/manifest actually changes |
+
+**Boundary rule:** N/A — this call site only writes a cached summary string to
+reach's own `ProjectInsight` table. It has no path to any privileged action;
+reach's actual privileged actions (start/stop/restart containers via
+`/api/console/apps/*`) are all human-triggered from the UI, never
+AI-initiated or AI-recommended.
+
+**Grounding contract:** no formal citation/fact-check exists — the summary is
+a free paraphrase of a project's own README/CLAUDE.md, not a claim system
+with checkable ids. Flagged, not fixed: nothing today verifies the summary
+doesn't state something beyond what the source docs actually say. Low
+practical risk (short output, admin-reviewable, content-hash cached so a bad
+summary doesn't silently regenerate every request) but worth knowing this is
+an open gap, not a solved one, if `/insights` summaries are ever surfaced to
+non-admin users or used for anything beyond display.
+
+**Full pattern reference:** `~/.claude/templates/agentic-app/AGENTIC_PATTERNS_REFERENCE.md`.
+
+Decisions behind this call site, and any changes to it, belong in `REVIEW.md`.
