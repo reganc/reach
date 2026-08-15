@@ -54,3 +54,43 @@
     @apply bg-muted-foreground/30;
   }
 }
+
+/* ---- Holo "command-deck" design spec ----
+   From holo-shell bundle ~/apps/.design-specs/reach/2026-07-10-command-deck.
+   Namespaced --holo-* because the shadcn variables above already own
+   --accent/--border in HSL-triple format. Holo pattern components
+   (components/portfolio/holo/*) style themselves ONLY from these variables —
+   retheme by editing this block, never the components. */
+.holo {
+  --holo-accent: #c98bff;
+  --holo-accent2: #e6c4ff;
+  --holo-bg: #0a0512;
+  --holo-bg2: #1d0f34;
+  --holo-font: var(--font-rajdhani), sans-serif;
+  --holo-display: var(--font-orbitron), sans-serif;
+  --holo-persp: 1500px;
+  --holo-lift: 1.15;
+  --holo-card-ms: 320ms;
+  --holo-card-ease: cubic-bezier(0.2, 0.75, 0.3, 1);
+}
+
+.holo-card {
+  transition: transform var(--holo-card-ms) var(--holo-card-ease);
+}
+.holo-card:hover {
+  transform: translateY(calc(-2px * var(--holo-lift)));
+}
+
+@keyframes holo-gridmove {
+  to {
+    background-position: 0 44px;
+  }
+}
+@keyframes holo-scan {
+  0% {
+    transform: translateY(-120px);
+  }
+  100% {
+    transform: translateY(105vh);
+  }
+}

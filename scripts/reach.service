@@ -19,7 +19,12 @@ Group=regan
 WorkingDirectory=/home/regan/apps/reach
 Environment=NODE_ENV=production
 Environment=PORT=3000
-Environment=HOST=0.0.0.0
+# Loopback only. Reach's admin console hands out a real PTY on this host, so
+# the only ingress is Tailscale Serve (`tailscale serve --https=8444
+# http://127.0.0.1:3000` — 8443 is already nginx here), which authenticates the
+# device at the WireGuard layer before any HTTP is spoken. Binding 0.0.0.0 would
+# put a shell endpoint on whatever LAN this machine is attached to.
+Environment=HOST=127.0.0.1
 Environment=HOME=/home/regan
 ExecStart=/home/regan/apps/reach/scripts/start-prod.sh
 Restart=always

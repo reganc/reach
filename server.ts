@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from "ws"
 import { getToken } from "next-auth/jwt"
 import type { IncomingMessage, ServerResponse } from "http"
 import * as store from "./lib/terminal/session-store"
+import { hasAllowedTailnetIdentityNode } from "./lib/auth/tailnet"
 
 const dev = process.env.NODE_ENV !== "production"
 const hostname = process.env.HOST ?? "0.0.0.0"
@@ -16,7 +17,24 @@ const handle = app.getRequestHandler()
 async function authAdmin(req: IncomingMessage): Promise<string | null> {
   const secret = process.env.NEXTAUTH_SECRET
   if (!secret) return null
-  const token = await getToken({ req: req as Parameters<typeof getToken>[0]["req"], secret })
+  // The terminal endpoints are served here, ahead of Next.js, so the tailnet
+  // gate in middleware.ts never sees them — and a PTY is exactly what that
+  // gate exists to protect. Enforce it at this choke point instead, which
+  // covers the session list, kill, and the WebSocket upgrade alike.
+  if (!hasAllowedTailnetIdentityNode(req.headers)) return null
+  // Auth.js prefixes the session cookie with `__Secure-` whenever the sign-in
+  // happened over https — which is every remote session, since the only remote
+  // ingress is Tailscale Serve on https. `getToken` looks for the unprefixed
+  // name unless told otherwise, so without this it finds no token over the
+  // tailnet and every terminal request 401s while loopback keeps working.
+  // Key off the cookie the client actually presents rather than a forwarded
+  // proto header, so this holds regardless of what fronts the process.
+  const secureCookie = (req.headers.cookie ?? "").includes("__Secure-authjs.session-token")
+  const token = await getToken({
+    req: req as Parameters<typeof getToken>[0]["req"],
+    secret,
+    secureCookie,
+  })
   if (!token || token.role !== "ADMIN") return null
   // token.id is set in the jwt callback; fall back to email/sub for stability.
   return (token.id as string) ?? (token.email as string) ?? (token.sub as string) ?? "admin"

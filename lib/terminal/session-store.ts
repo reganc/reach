@@ -92,6 +92,13 @@ function ensureTmuxOptions(): Promise<void> {
       "set", "-g", "history-limit", "50000", ";",
       "set", "-g", "escape-time", "10", ";",
       "set", "-g", "default-terminal", "screen-256color", ";",
+      // tmux draws in the alternate screen, so xterm.js's own scrollback never
+      // fills — without mouse mode the wheel degrades to arrow-key presses.
+      // Mouse mode makes wheel-up enter copy-mode and scroll real history.
+      "set", "-g", "mouse", "on", ";",
+      // Copy-mode selections are emitted as OSC 52 so the browser terminal can
+      // forward them to the system clipboard.
+      "set", "-s", "set-clipboard", "on", ";",
       "set", "-s", "exit-empty", "off",
     ])
       .then(() => undefined)

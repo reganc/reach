@@ -6,6 +6,35 @@ import { cn } from "@/lib/utils"
 
 type Status = "connecting" | "connected" | "disconnected" | "exited"
 
+/**
+ * Copy to the system clipboard, falling back to execCommand for non-secure
+ * contexts (this app is often reached over plain-http LAN, where
+ * navigator.clipboard is unavailable).
+ */
+async function copyText(text: string): Promise<void> {
+  if (!text) return
+  try {
+    if (window.isSecureContext && navigator.clipboard) {
+      await navigator.clipboard.writeText(text)
+      return
+    }
+  } catch {
+    /* fall through to legacy path */
+  }
+  const ta = document.createElement("textarea")
+  ta.value = text
+  ta.style.position = "fixed"
+  ta.style.opacity = "0"
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand("copy")
+  } catch {
+    /* clipboard unavailable — nothing else we can do */
+  }
+  ta.remove()
+}
+
 interface Props {
   active: boolean
   /** Stable id of the server-side PTY session this terminal attaches to. */
@@ -16,6 +45,7 @@ export function TerminalTab({ active, sessionId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const fitRef = useRef<(() => void) | null>(null)
+  const termRef = useRef<import("@xterm/xterm").Terminal | null>(null)
   const [status, setStatus] = useState<Status>("connecting")
   const [restored, setRestored] = useState(false)
   const [expanded, setExpanded] = useState(false)
@@ -81,6 +111,33 @@ export function TerminalTab({ active, sessionId }: Props) {
       term.loadAddon(new WebLinksAddon())
       term.open(containerRef.current)
       fitAddon.fit()
+      termRef.current = term
+
+      // Ctrl+C copies when text is selected (VS Code behavior); with no
+      // selection it falls through to the shell as SIGINT.
+      term.attachCustomKeyEventHandler((e) => {
+        if (e.type !== "keydown") return true
+        if ((e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C") && term.hasSelection()) {
+          void copyText(term.getSelection()).finally(() => term.focus())
+          return false
+        }
+        return true
+      })
+
+      // OSC 52: tmux emits copy-mode selections (mouse drag → release) as an
+      // OSC 52 sequence; forward the payload to the system clipboard.
+      term.parser.registerOscHandler(52, (data) => {
+        const idx = data.indexOf(";")
+        const b64 = idx === -1 ? data : data.slice(idx + 1)
+        if (!b64 || b64 === "?") return true // clipboard reads are not supported
+        try {
+          const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+          void copyText(new TextDecoder().decode(bytes)).finally(() => term.focus())
+        } catch {
+          /* malformed payload — ignore */
+        }
+        return true
+      })
 
       fitRef.current = () => {
         try { fitAddon.fit() } catch { /* ignore during teardown */ }
@@ -148,6 +205,7 @@ export function TerminalTab({ active, sessionId }: Props) {
       cleanupRef.current = () => {
         mounted = false
         fitRef.current = null
+        if (termRef.current === term) termRef.current = null
         if (resizeTimer) clearTimeout(resizeTimer)
         ro.disconnect()
         ws.close()
@@ -164,11 +222,20 @@ export function TerminalTab({ active, sessionId }: Props) {
     return () => cleanupRef.current?.()
   }, [connect])
 
-  // When this tab becomes visible again, re-fit so xterm fills the container correctly
+  // When this tab becomes visible again, re-fit and repaint. xterm renders
+  // into a canvas that goes stale while the container is display:none — without
+  // an explicit refresh the viewport shows blank/garbled rows until a keypress.
   useEffect(() => {
-    if (active && fitRef.current) {
-      requestAnimationFrame(() => fitRef.current?.())
-    }
+    if (!active) return
+    const raf = requestAnimationFrame(() => {
+      fitRef.current?.()
+      const term = termRef.current
+      if (term) {
+        term.refresh(0, term.rows - 1)
+        term.focus()
+      }
+    })
+    return () => cancelAnimationFrame(raf)
   }, [active])
 
   const statusColor: Record<Status, string> = {
@@ -232,7 +299,11 @@ export function TerminalTab({ active, sessionId }: Props) {
         className="flex-1 p-2"
         style={{ minHeight: expanded ? undefined : 480 }}
         onClick={() => {
-          containerRef.current?.querySelector<HTMLElement>(".xterm-helper-textarea")?.focus()
+          // Focus via xterm's API (avoids scroll jumps from raw textarea.focus),
+          // and never while a selection exists — stealing focus there would
+          // clear the selection before the user can copy it.
+          const term = termRef.current
+          if (term && !term.hasSelection()) term.focus()
         }}
       />
     </div>

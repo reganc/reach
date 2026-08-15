@@ -27,3 +27,37 @@ model App {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
+
+// AI-generated purpose summary for a project directory, produced by the local
+// LLM (Ollama Lane B). sourceHash fingerprints the inputs (README / CLAUDE.md /
+// package.json) so a summary is only regenerated when its sources change.
+model ProjectInsight {
+  slug         String   @id
+  summary      String
+  sourceHash   String
+  model        String?
+  summarizedAt DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// Curated development-lifecycle metadata for a project under ~/apps.
+// The discovered/runtime fields (git status, stack, freshness) are computed on
+// the fly in lib/projects/scan.ts and merged with this row by `slug`. Only the
+// sticky, human-owned fields live here. Rows with exists=false are planned apps
+// that have no directory on disk yet.
+model Project {
+  id             String    @id @default(cuid())
+  slug           String    @unique // directory name under ~/apps, or a chosen slug for planned apps
+  displayName    String? // overrides the slug in the UI when set
+  stage          String    @default("unsorted") // unsorted|idea|scaffold|active|beta|prod|maintenance|deprecated|archived
+  owner          String?
+  description    String?
+  notes          String?
+  tags           String? // JSON-encoded string[]
+  pinned         Boolean   @default(false)
+  exists         Boolean   @default(true) // false = planned, no directory yet
+  checksEnabled  Boolean   @default(false) // Phase 2: opt-in to scheduled build/test checks
+  lastReviewedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}

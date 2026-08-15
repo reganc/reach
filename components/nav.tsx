@@ -3,7 +3,7 @@
 import { signOut } from "next-auth/react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Layers, LayoutGrid, Settings, LogOut, Activity } from "lucide-react"
+import { Layers, LayoutGrid, Settings, LogOut, Activity, FolderUp, Compass, BarChart3 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 interface NavProps {
@@ -43,10 +43,28 @@ export default function Nav({ user }: NavProps) {
         {isAdmin && (
           <>
             <NavItem
+              href="/portfolio"
+              icon={<Compass className="w-4 h-4" />}
+              label="Portfolio"
+              active={pathname.startsWith("/portfolio")}
+            />
+            <NavItem
+              href="/insights"
+              icon={<BarChart3 className="w-4 h-4" />}
+              label="Insights"
+              active={pathname.startsWith("/insights")}
+            />
+            <NavItem
               href="/console"
               icon={<Activity className="w-4 h-4" />}
               label="Console"
               active={pathname.startsWith("/console")}
+            />
+            <NavItem
+              href="/files"
+              icon={<FolderUp className="w-4 h-4" />}
+              label="Files"
+              active={pathname.startsWith("/files")}
             />
             <NavItem
               href="/admin"

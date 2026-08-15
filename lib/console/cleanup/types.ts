@@ -34,9 +34,14 @@ export interface CategoryScan {
   warnings?: string[]
 }
 
+export interface PruneOptions {
+  force?: boolean
+}
+
 export interface PruneRequest {
   confirm?: boolean
   ids?: string[]
+  options?: PruneOptions
 }
 
 export interface PruneResult {

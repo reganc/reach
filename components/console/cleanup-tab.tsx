@@ -52,6 +52,8 @@ interface ConfirmState {
   category: CleanupCategory
   preview: CleanupItem[]
   totalBytes: number
+  force: boolean
+  runningContainerCount: number
 }
 
 export function CleanupTab() {
@@ -64,6 +66,7 @@ export function CleanupTab() {
   const [pruning, setPruning] = useState<Set<CleanupCategory>>(new Set())
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [toast, setToast] = useState<string | null>(null)
+  const [forceMode, setForceMode] = useState<Set<CleanupCategory>>(new Set())
 
   const fetchSummary = useCallback(async () => {
     setLoadingSummary(true)
@@ -109,24 +112,39 @@ export function CleanupTab() {
     })
   }, [scans, fetchScan])
 
-  const requestPrune = useCallback(async (category: CleanupCategory) => {
+  const requestPrune = useCallback(async (category: CleanupCategory, forceOverride?: boolean) => {
     const ids = Array.from(selected[category] ?? [])
+    const force = forceOverride ?? forceMode.has(category)
     const r = await fetch(`/api/console/cleanup/${category}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ confirm: false, ids: ids.length > 0 ? ids : undefined }),
+      body: JSON.stringify({
+        confirm: false,
+        ids: ids.length > 0 ? ids : undefined,
+        options: force ? { force: true } : undefined,
+      }),
     })
     if (!r.ok) {
       setToast(`Preview failed: HTTP ${r.status}`)
       return
     }
     const data = (await r.json()) as PruneResult
-    setConfirm({ category, preview: data.preview, totalBytes: data.preview.reduce((a, b) => a + b.bytes, 0) })
-  }, [selected])
+    const runningContainerCount = data.preview.reduce((sum, it) => {
+      const running = String(it.meta?.runningContainers ?? "")
+      return sum + (running ? running.split(",").filter(Boolean).length : 0)
+    }, 0)
+    setConfirm({
+      category,
+      preview: data.preview,
+      totalBytes: data.preview.reduce((a, b) => a + b.bytes, 0),
+      force,
+      runningContainerCount,
+    })
+  }, [selected, forceMode])
 
   const executePrune = useCallback(async () => {
     if (!confirm) return
-    const { category } = confirm
+    const { category, force } = confirm
     const ids = Array.from(selected[category] ?? [])
     setConfirm(null)
     setPruning((prev) => new Set(prev).add(category))
@@ -134,7 +152,11 @@ export function CleanupTab() {
       const r = await fetch(`/api/console/cleanup/${category}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ confirm: true, ids: ids.length > 0 ? ids : undefined }),
+        body: JSON.stringify({
+          confirm: true,
+          ids: ids.length > 0 ? ids : undefined,
+          options: force ? { force: true } : undefined,
+        }),
       })
       if (!r.ok) {
         setToast(`Prune failed: HTTP ${r.status}`)
@@ -171,15 +193,26 @@ export function CleanupTab() {
   const toggleAllInCategory = useCallback((category: CleanupCategory) => {
     const scan = scans[category]
     if (!scan) return
+    const force = forceMode.has(category)
     setSelected((prev) => {
       const current = prev[category] ?? new Set()
-      const reclaimable = scan.items.filter((it) => !it.protected && (it.inUseBy ?? []).length === 0)
-      if (current.size >= reclaimable.length) {
+      const selectable = scan.items.filter((it) => !it.protected && (force || (it.inUseBy ?? []).length === 0))
+      if (current.size >= selectable.length) {
         return { ...prev, [category]: new Set() }
       }
-      return { ...prev, [category]: new Set(reclaimable.map((it) => it.id)) }
+      return { ...prev, [category]: new Set(selectable.map((it) => it.id)) }
     })
-  }, [scans])
+  }, [scans, forceMode])
+
+  const toggleForceMode = useCallback((category: CleanupCategory) => {
+    setForceMode((prev) => {
+      const next = new Set(prev)
+      if (next.has(category)) next.delete(category)
+      else next.add(category)
+      return next
+    })
+    setSelected((prev) => ({ ...prev, [category]: new Set() }))
+  }, [])
 
   useEffect(() => {
     if (!toast) return
@@ -262,7 +295,11 @@ export function CleanupTab() {
                     {scan && scan.items.length > 0 && hasPruneCapability(cat) && (
                       <>
                         <Button size="sm" variant="ghost" onClick={() => toggleAllInCategory(cat)}>
-                          {sel.size > 0 ? "Clear selection" : "Select all reclaimable"}
+                          {sel.size > 0
+                            ? "Clear selection"
+                            : forceMode.has(cat)
+                              ? "Select all (incl. in-use)"
+                              : "Select all reclaimable"}
                         </Button>
                         <Button
                           size="sm"
@@ -279,9 +316,31 @@ export function CleanupTab() {
                             {sel.size > 0 ? `Preview delete (${sel.size})` : "Preview delete reclaimable"}
                           </span>
                         </Button>
+                        {cat === "docker-images" && (
+                          <label className="flex items-center gap-1.5 text-xs text-muted-foreground ml-auto cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={forceMode.has(cat)}
+                              onChange={() => toggleForceMode(cat)}
+                            />
+                            <span>
+                              Force: stop running containers before delete
+                            </span>
+                          </label>
+                        )}
                       </>
                     )}
                   </div>
+                  {cat === "docker-images" && forceMode.has(cat) && (
+                    <div className="text-xs text-amber-400 bg-amber-400/5 border border-amber-400/20 rounded px-3 py-2 flex items-start gap-2">
+                      <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                      <span>
+                        Force mode active. Selecting an in-use image will stop and remove its running containers
+                        (and any stopped ones referencing it) before deleting the image. Compose-managed apps will
+                        not auto-restart unless something else triggers `docker compose up`.
+                      </span>
+                    </div>
+                  )}
                   {scan?.warnings && scan.warnings.length > 0 && (
                     <div className="text-xs text-amber-400 bg-amber-400/5 border border-amber-400/20 rounded px-3 py-2">
                       {scan.warnings.join(" · ")}
@@ -296,6 +355,15 @@ export function CleanupTab() {
                       selected={sel}
                       onToggle={(id) => toggleItem(cat, id)}
                       selectable={hasPruneCapability(cat)}
+                      allowInUse={forceMode.has(cat)}
+                      onStopAndDelete={
+                        cat === "docker-images"
+                          ? (id) => {
+                              setSelected((prev) => ({ ...prev, [cat]: new Set([id]) }))
+                              requestPrune(cat, true)
+                            }
+                          : undefined
+                      }
                     />
                   )}
                 </div>
@@ -316,6 +384,15 @@ export function CleanupTab() {
               <AlertDialogDescription>
                 This will free <span className="text-foreground font-medium">{formatBytes(confirm.totalBytes)}</span>.
                 This action cannot be undone.
+                {confirm.force && confirm.runningContainerCount > 0 && (
+                  <>
+                    {" "}
+                    <span className="block mt-2 text-amber-400">
+                      {confirm.runningContainerCount} running container
+                      {confirm.runningContainerCount === 1 ? "" : "s"} will be stopped and removed first.
+                    </span>
+                  </>
+                )}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <div className="max-h-72 overflow-y-auto border border-border rounded text-xs font-mono space-y-0.5 p-2">
@@ -353,35 +430,38 @@ function ItemList({
   selected,
   onToggle,
   selectable,
+  allowInUse = false,
+  onStopAndDelete,
 }: {
   items: CleanupItem[]
   selected: Set<string>
   onToggle: (id: string) => void
   selectable: boolean
+  allowInUse?: boolean
+  onStopAndDelete?: (id: string) => void
 }) {
   return (
     <div className="border border-border rounded text-sm">
       {items.slice(0, 200).map((it, idx) => {
         const inUse = (it.inUseBy ?? []).length > 0
         const isProtected = !!it.protected
-        const reclaimable = !inUse && !isProtected
+        const canSelect = !isProtected && (allowInUse || !inUse)
         const isSelected = selected.has(it.id)
         return (
-          <label
+          <div
             key={it.id}
             className={cn(
-              "flex items-start gap-3 px-3 py-2 cursor-pointer",
+              "flex items-start gap-3 px-3 py-2",
               idx > 0 && "border-t border-border",
               isProtected && "opacity-60",
-              !reclaimable && "cursor-not-allowed",
             )}
           >
             {selectable && (
               <input
                 type="checkbox"
-                disabled={!reclaimable}
+                disabled={!canSelect}
                 checked={isSelected}
-                onChange={() => reclaimable && onToggle(it.id)}
+                onChange={() => canSelect && onToggle(it.id)}
                 className="mt-1 shrink-0"
               />
             )}
@@ -406,13 +486,27 @@ function ItemList({
                 </p>
               )}
             </div>
-            <div className="text-right text-xs shrink-0 tabular-nums">
-              <div className="font-mono">{formatBytes(it.bytes)}</div>
-              {it.ageMs !== undefined && (
-                <div className="text-muted-foreground">{formatRelative(new Date(Date.now() - it.ageMs).toISOString())}</div>
+            <div className="flex items-center gap-2 shrink-0">
+              {inUse && onStopAndDelete && !isProtected && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-xs text-amber-400 hover:text-amber-300"
+                  onClick={() => onStopAndDelete(it.id)}
+                  title="Stop running containers and delete this image"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span className="ml-1">Stop & delete</span>
+                </Button>
               )}
+              <div className="text-right text-xs tabular-nums">
+                <div className="font-mono">{formatBytes(it.bytes)}</div>
+                {it.ageMs !== undefined && (
+                  <div className="text-muted-foreground">{formatRelative(new Date(Date.now() - it.ageMs).toISOString())}</div>
+                )}
+              </div>
             </div>
-          </label>
+          </div>
         )
       })}
       {items.length > 200 && (

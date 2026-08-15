@@ -22,12 +22,12 @@ import {
 } from "./filesystem"
 import { scanContainerLogs, scanJournald, pruneContainerLogs, pruneJournald } from "./logs"
 import { scanListeningPorts } from "./listening-ports"
-import type { CategoryScan, CleanupCategory, PruneResult } from "./types"
+import type { CategoryScan, CleanupCategory, PruneOptions, PruneResult } from "./types"
 
 interface CategoryDef {
   label: string
   scan: () => Promise<CategoryScan>
-  prune?: (dryRun: boolean, ids?: string[]) => Promise<PruneResult>
+  prune?: (dryRun: boolean, ids?: string[], opts?: PruneOptions) => Promise<PruneResult>
 }
 
 export const CATEGORIES: Record<CleanupCategory, CategoryDef> = {

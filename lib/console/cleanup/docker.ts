@@ -4,7 +4,14 @@ import {
   getComposeReferencedVolumeNames,
   isProtectedVolumeName,
 } from "./safety"
-import type { CategoryScan, CleanupItem, PruneResult } from "./types"
+import type { CategoryScan, CleanupItem, PruneOptions, PruneResult } from "./types"
+
+interface ContainerRef {
+  id: string
+  name: string
+  state: string
+  running: boolean
+}
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -154,61 +161,104 @@ export async function scanImages(): Promise<CategoryScan> {
   if (res.code !== 0) {
     return { category: "docker-images", items, totalBytes, reclaimableBytes: 0, scannedAt: nowIso(), warnings: [res.stderr.trim().slice(0, 200)] }
   }
-  // Build a set of image IDs in use by any container (running or stopped).
-  const usage = await imageIdsInUseByContainers()
+  // Map: full image sha (no "sha256:" prefix) → containers referencing it.
+  const usage = await imageUsageByContainers()
   const rows = parseJsonLines<DockerImageRow>(res.stdout)
   for (const r of rows) {
     const bytes = parseHumanSize(r.Size)
     totalBytes += bytes
     const dangling = r.Repository === "<none>" && r.Tag === "<none>"
-    const inUse = usage.has(r.ID)
-    const inUseBy = inUse ? ["container"] : []
-    if (!inUse) reclaimable += bytes
+    const containers = findContainersForShortId(r.ID, usage)
+    const running = containers.filter((c) => c.running)
+    const stopped = containers.filter((c) => !c.running)
+    // Only running containers block normal reclaim. Stopped refs can be cleaned by --force.
+    const inUseBy = running.map((c) => `running:${c.name}`)
+    if (inUseBy.length === 0) reclaimable += bytes
     items.push({
       id: r.ID,
       category: "docker-images",
       label: dangling ? `<none>:<none> (${r.ID.slice(0, 12)})` : `${r.Repository}:${r.Tag}`,
-      detail: r.ID.slice(0, 12),
+      detail: stopped.length > 0
+        ? `${r.ID.slice(0, 12)} · ${stopped.length} stopped container${stopped.length === 1 ? "" : "s"}`
+        : r.ID.slice(0, 12),
       bytes,
       ageMs: ageMsFromCreatedAt(r.CreatedAt),
       inUseBy,
-      meta: { dangling, repository: r.Repository, tag: r.Tag },
+      meta: {
+        dangling,
+        repository: r.Repository,
+        tag: r.Tag,
+        runningContainers: running.map((c) => `${c.id}:${c.name}`).join(","),
+        stoppedContainers: stopped.map((c) => `${c.id}:${c.name}`).join(","),
+      },
     })
   }
   items.sort((a, b) => b.bytes - a.bytes)
   return { category: "docker-images", items, totalBytes, reclaimableBytes: reclaimable, scannedAt: nowIso() }
 }
 
-async function imageIdsInUseByContainers(): Promise<Set<string>> {
-  const out = new Set<string>()
-  const res = await runCommand("docker", ["ps", "-a", "--format", "{{.Image}}|{{.ImageID}}"], { timeoutMs: 10_000 })
-  if (res.code !== 0) return out
-  for (const line of res.stdout.split("\n")) {
-    const [, id] = line.trim().split("|")
-    if (id) out.add(id)
-  }
-  // Also resolve image names via inspect for containers without ImageID column
-  const namesRes = await runCommand("docker", ["ps", "-a", "--format", "{{.Image}}"], { timeoutMs: 10_000 })
-  if (namesRes.code === 0) {
-    const names = Array.from(new Set(namesRes.stdout.split("\n").map((s) => s.trim()).filter(Boolean)))
-    if (names.length > 0) {
-      const inspect = await runCommand("docker", ["image", "inspect", "--format", "{{.Id}}", ...names], { timeoutMs: 15_000 })
-      if (inspect.code === 0) {
-        for (const id of inspect.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
-          out.add(id)
-          // Some Docker versions return sha256:abc...; normalise to short form for matching
-          if (id.startsWith("sha256:")) out.add(id.slice(7))
-        }
-      }
+async function imageUsageByContainers(): Promise<Map<string, ContainerRef[]>> {
+  const map = new Map<string, ContainerRef[]>()
+  const list = await runCommand("docker", ["ps", "-a", "--format", "{{.ID}}"], { timeoutMs: 10_000 })
+  if (list.code !== 0) return map
+  const containerIds = list.stdout.split("\n").map((s) => s.trim()).filter(Boolean)
+  if (containerIds.length === 0) return map
+  const insp = await runCommand(
+    "docker",
+    [
+      "inspect",
+      "--format",
+      "{{.Id}}|{{.Image}}|{{.State.Status}}|{{.Name}}",
+      ...containerIds,
+    ],
+    { timeoutMs: 20_000 },
+  )
+  if (insp.code !== 0) return map
+  for (const line of insp.stdout.split("\n")) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const parts = trimmed.split("|")
+    if (parts.length < 4) continue
+    const [containerId, imageSha, state, rawName] = parts
+    if (!imageSha) continue
+    const key = imageSha.startsWith("sha256:") ? imageSha.slice(7) : imageSha
+    const ref: ContainerRef = {
+      id: containerId.startsWith("sha256:") ? containerId.slice(7, 19) : containerId.slice(0, 12),
+      name: rawName.replace(/^\//, ""),
+      state,
+      running: state === "running" || state === "restarting" || state === "paused",
     }
+    const arr = map.get(key)
+    if (arr) arr.push(ref)
+    else map.set(key, [ref])
   }
-  return out
+  return map
 }
 
-export async function pruneImages(dryRun: boolean, ids?: string[]): Promise<PruneResult> {
+function findContainersForShortId(shortId: string, usage: Map<string, ContainerRef[]>): ContainerRef[] {
+  for (const [fullSha, refs] of usage) {
+    if (fullSha.startsWith(shortId)) return refs
+  }
+  return []
+}
+
+function parseContainerListMeta(s: string | undefined): Array<{ id: string; name: string }> {
+  if (!s) return []
+  return s.split(",").filter(Boolean).map((part) => {
+    const [id, name] = part.split(":")
+    return { id: id ?? "", name: name ?? id ?? "" }
+  })
+}
+
+export async function pruneImages(
+  dryRun: boolean,
+  ids?: string[],
+  opts: PruneOptions = {},
+): Promise<PruneResult> {
   const scan = await scanImages()
+  const force = opts.force === true
   const targets = ids && ids.length > 0
-    ? scan.items.filter((it) => ids.includes(it.id))
+    ? scan.items.filter((it) => ids.includes(it.id) && (force || (it.inUseBy ?? []).length === 0))
     : scan.items.filter((it) => (it.inUseBy ?? []).length === 0)
   if (dryRun) {
     return {
@@ -222,6 +272,36 @@ export async function pruneImages(dryRun: boolean, ids?: string[]): Promise<Prun
   const executed: PruneResult["executed"] = []
   let freed = 0
   for (const t of targets) {
+    let stopRemoveError: string | null = null
+    if (force) {
+      const running = parseContainerListMeta(t.meta?.runningContainers as string | undefined)
+      const stopped = parseContainerListMeta(t.meta?.stoppedContainers as string | undefined)
+      for (const c of running) {
+        const stop = await runCommand("docker", ["stop", "-t", "10", c.id], { timeoutMs: 30_000 })
+        if (stop.code !== 0) {
+          stopRemoveError = `stop ${c.name}: ${stop.stderr.trim().slice(0, 120)}`
+          break
+        }
+        const rm = await runCommand("docker", ["rm", "-f", c.id], { timeoutMs: 20_000 })
+        if (rm.code !== 0) {
+          stopRemoveError = `rm ${c.name}: ${rm.stderr.trim().slice(0, 120)}`
+          break
+        }
+      }
+      if (!stopRemoveError) {
+        for (const c of stopped) {
+          const rm = await runCommand("docker", ["rm", "-f", c.id], { timeoutMs: 20_000 })
+          if (rm.code !== 0) {
+            stopRemoveError = `rm ${c.name}: ${rm.stderr.trim().slice(0, 120)}`
+            break
+          }
+        }
+      }
+    }
+    if (stopRemoveError) {
+      executed.push({ id: t.id, ok: false, error: stopRemoveError, bytesFreed: 0 })
+      continue
+    }
     const res = await runCommand("docker", ["image", "rm", "-f", t.id], { timeoutMs: 30_000 })
     const ok = res.code === 0
     if (ok) freed += t.bytes

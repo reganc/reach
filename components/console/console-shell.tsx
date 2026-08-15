@@ -252,7 +252,10 @@ export function ConsoleShell() {
             {/* Terminal instances — keep all mounted to preserve sessions */}
             {sessions.map((session) => (
               <div key={session.id} className={session.id === activeSessionId ? "" : "hidden"}>
-                <TerminalTab active={session.id === activeSessionId} sessionId={session.id} />
+                <TerminalTab
+                  active={tab === "terminal" && session.id === activeSessionId}
+                  sessionId={session.id}
+                />
               </div>
             ))}
           </div>}

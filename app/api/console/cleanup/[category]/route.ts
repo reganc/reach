@@ -43,7 +43,7 @@ export async function POST(req: Request, ctx: RouteContext) {
     // empty body == dry run
   }
   const dryRun = body.confirm !== true
-  const result = await def.prune(dryRun, body.ids)
+  const result = await def.prune(dryRun, body.ids, body.options)
   if (!dryRun) {
     await appendAudit({
       ts: new Date().toISOString(),
