@@ -29,12 +29,45 @@ npm run db:studio            # Prisma Studio GUI
 
 **Reach** is a self-hosted app portal. Authenticated users see a grid of app cards; clicking one opens the app in a full-screen iframe overlay. Admins manage apps and user accounts.
 
+### Remote access (two listeners, two trust levels)
+
+Reach is reachable from three places, and **which listening socket a request
+arrived on is what decides whether the admin surface answers**. `server.ts`
+stamps `x-reach-ingress` from the socket and overwrites whatever the client
+sent; `lib/auth/tailnet.ts` reads it. This replaced an `X-Forwarded-For`
+loopback heuristic, which became forgeable the moment reach bound a
+non-loopback interface (any LAN client can claim `X-Forwarded-For: 127.0.0.1`).
+
+| Ingress | Socket | How you get there | Admin surface |
+|---|---|---|---|
+| **trusted** | `127.0.0.1:3000` | on-box; tailnet via `tailscale serve --https=8444` → `https://comet.taild00e4a.ts.net:8444` | **yes** (subject to the identity allowlist) |
+| **public** | `0.0.0.0:3199` | LAN `http://10.0.0.49:3199`; internet via `tailscale funnel --https=443` → `https://comet.taild00e4a.ts.net` | **no** — refused |
+
+"Admin surface" = `/console`, `/files`, `/admin`, `/insights`, `/portfolio`,
+`/api/console/*`, `/api/files/*`, `/api/projects/*`, `/api/users/*`, and the
+terminal HTTP + WebSocket endpoints in `server.ts`. Public ingress gets login,
+the launcher, and nothing else; `components/nav.tsx` hides the admin links there
+rather than showing links that bounce.
+
+**Config invariant — Funnel must target the public port, never 3000.** Funnel
+proxies from loopback and carries no tailnet identity, so a funnel aimed at the
+trusted socket would arrive looking like an on-box request. The `isDirectLoopback`
+check in `lib/auth/tailnet.ts` is the second line of defence against exactly
+that mistake; don't remove it.
+
+Because `/login` is now internet-facing, `lib/auth/login-throttle.ts` applies a
+progressive per-email delay (never a lockout — that would let anyone lock the
+admin out) plus a per-IP ceiling, and `auth.ts` compares against a decoy hash
+for absent accounts so timing doesn't leak which emails exist.
+
 ### Auth
 - NextAuth v5 (beta) with JWT strategy and credentials provider
 - `auth.ts` — config, exports `{ handlers, signIn, signOut, auth }`
 - `middleware.ts` — protects all routes, redirects `/admin/*` and `/console/*` for non-admins
 - Role is stored in the JWT and available as `session.user.role` (`"ADMIN"` | `"USER"`)
 - Two roles: **ADMIN** (full CRUD on apps + users + console) and **USER** (launcher only)
+- Admin routes require a third thing beyond session + role: trusted ingress with
+  an approved tailnet identity (`REACH_TAILNET_ADMIN_LOGINS`). See above.
 
 ### Data
 - Prisma + SQLite (`reach.db`, gitignored)

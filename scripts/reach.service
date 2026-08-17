@@ -18,13 +18,31 @@ User=regan
 Group=regan
 WorkingDirectory=/home/regan/apps/reach
 Environment=NODE_ENV=production
-Environment=PORT=3000
-# Loopback only. Reach's admin console hands out a real PTY on this host, so
-# the only ingress is Tailscale Serve (`tailscale serve --https=8444
+#
+# Two listeners, two trust levels. Reach's admin console hands out a real PTY on
+# this host, so which socket a request arrives on is what decides whether the
+# admin surface answers at all — see lib/auth/tailnet.ts.
+#
+# PORT / HOST — trusted ingress, loopback only. Reachable by processes on this
+# box and by Tailscale Serve (`tailscale serve --bg --https=8444
 # http://127.0.0.1:3000` — 8443 is already nginx here), which authenticates the
-# device at the WireGuard layer before any HTTP is spoken. Binding 0.0.0.0 would
-# put a shell endpoint on whatever LAN this machine is attached to.
+# device at the WireGuard layer and stamps the peer's identity before any HTTP is
+# spoken. The admin surface is served here and nowhere else.
+Environment=PORT=3000
 Environment=HOST=127.0.0.1
+#
+# REACH_PUBLIC_PORT / REACH_PUBLIC_HOST — public ingress. Serves the LAN
+# directly (http://10.0.0.49:3199) and is Tailscale Funnel's proxy target for
+# the public internet (`tailscale funnel --bg --https=443
+# http://127.0.0.1:3199` → https://comet.taild00e4a.ts.net). Login and the app
+# launcher work here; /console, /files, /admin, /insights and the terminal
+# WebSocket are refused outright.
+#
+# Funnel MUST point at this port and never at PORT above: Funnel proxies from
+# loopback and carries no tailnet identity, so a funnel aimed at the trusted
+# socket would arrive looking like an on-box request.
+Environment=REACH_PUBLIC_PORT=3199
+Environment=REACH_PUBLIC_HOST=0.0.0.0
 Environment=HOME=/home/regan
 ExecStart=/home/regan/apps/reach/scripts/start-prod.sh
 Restart=always

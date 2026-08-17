@@ -21,9 +21,18 @@ function externalUrl(path: string, req: { nextUrl: URL; headers: Headers }): URL
   const url = new URL(path, req.nextUrl)
   const host = firstHop(req.headers.get("x-forwarded-host"))
   if (host) {
-    url.host = host
     const proto = firstHop(req.headers.get("x-forwarded-proto"))
     if (proto) url.protocol = proto
+    // Clear the port before assigning the host. Per the URL spec, setting
+    // `host` to a value with no port leaves the existing port untouched — so a
+    // forwarded host on an implicit port (Funnel on 443) would inherit
+    // `nextUrl`'s internal port and send a remote browser to
+    // `https://<funnel-host>:3000/login`, which answers nowhere. Clearing first
+    // means "portless forwarded host" resolves to the protocol's default, while
+    // a host that does carry a port (`10.0.0.49:3199`, `…ts.net:8444`) still
+    // sets both halves.
+    url.port = ""
+    url.host = host
   }
   return url
 }

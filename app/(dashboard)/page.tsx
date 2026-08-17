@@ -1,9 +1,17 @@
+import { headers } from "next/headers"
 import { prisma } from "@/lib/db"
 import AppGrid from "@/components/app-grid"
+import { resolveAppUrl, viewerOriginFrom } from "@/lib/apps/viewer-url"
 import type { App } from "@/lib/types"
 
 export default async function DashboardPage() {
-  const apps = await prisma.app.findMany({ orderBy: { createdAt: "asc" } })
+  const stored = await prisma.app.findMany({ orderBy: { createdAt: "asc" } })
+
+  // Cards are stored as http://localhost:<port>, which points at the visitor's
+  // own machine once reach is opened from anywhere but this box. See
+  // lib/apps/viewer-url.ts.
+  const origin = viewerOriginFrom(await headers())
+  const apps = stored.map((app) => ({ ...app, url: resolveAppUrl(app.url, origin) }))
 
   return (
     <div className="h-full">

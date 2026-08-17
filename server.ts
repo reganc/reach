@@ -4,14 +4,49 @@ import { WebSocketServer, WebSocket } from "ws"
 import { getToken } from "next-auth/jwt"
 import type { IncomingMessage, ServerResponse } from "http"
 import * as store from "./lib/terminal/session-store"
-import { hasAllowedTailnetIdentityNode } from "./lib/auth/tailnet"
+import {
+  hasAllowedTailnetIdentityNode,
+  INGRESS_HEADER,
+  TAILSCALE_IDENTITY_HEADERS,
+  type Ingress,
+} from "./lib/auth/tailnet"
 
 const dev = process.env.NODE_ENV !== "production"
 const hostname = process.env.HOST ?? "0.0.0.0"
 const port = parseInt(process.env.PORT ?? "3000", 10)
 
+/**
+ * Optional second listener for untrusted networks — the LAN, plus Tailscale
+ * Funnel's proxy target for the public internet. Off unless configured, so a
+ * bare `tsx server.ts` never exposes a shell endpoint by accident.
+ *
+ * Everything served here is identical except that the admin surface is refused:
+ * see `lib/auth/tailnet.ts` for why the listening socket, rather than a
+ * forwarded header, is what decides that.
+ */
+const publicPort = parseInt(process.env.REACH_PUBLIC_PORT ?? "0", 10)
+const publicHostname = process.env.REACH_PUBLIC_HOST ?? "0.0.0.0"
+
 const app = next({ dev, hostname, port })
 const handle = app.getRequestHandler()
+
+/**
+ * Label a request with the socket it arrived on, and scrub anything the client
+ * sent that only a trusted proxy is allowed to assert.
+ *
+ * Both halves matter. The stamp is overwritten unconditionally so a client
+ * cannot claim trusted ingress; the identity headers are dropped on public
+ * ingress so a LAN client cannot forge `Tailscale-User-Login: reganc@github`
+ * and satisfy the admin allowlist. On the trusted socket those headers are left
+ * alone — they can only have come from Tailscale Serve or from something that
+ * already has loopback access to this box.
+ */
+function stampIngress(req: IncomingMessage, ingress: Ingress) {
+  req.headers[INGRESS_HEADER] = ingress
+  if (ingress !== "trusted") {
+    for (const header of TAILSCALE_IDENTITY_HEADERS) delete req.headers[header]
+  }
+}
 
 /** Resolve a stable owner id for ADMIN requests, or null if not authorized. */
 async function authAdmin(req: IncomingMessage): Promise<string | null> {
@@ -20,7 +55,9 @@ async function authAdmin(req: IncomingMessage): Promise<string | null> {
   // The terminal endpoints are served here, ahead of Next.js, so the tailnet
   // gate in middleware.ts never sees them — and a PTY is exactly what that
   // gate exists to protect. Enforce it at this choke point instead, which
-  // covers the session list, kill, and the WebSocket upgrade alike.
+  // covers the session list, kill, and the WebSocket upgrade alike. The same
+  // call also rejects public ingress outright (LAN / Funnel), because
+  // `stampIngress` has already labelled the request by listening socket.
   if (!hasAllowedTailnetIdentityNode(req.headers)) return null
   // Auth.js prefixes the session cookie with `__Secure-` whenever the sign-in
   // happened over https — which is every remote session, since the only remote
@@ -74,7 +111,11 @@ const sanitizeId = (raw: string | null): string | null =>
   raw && SESSION_ID_RE.test(raw) ? raw : null
 
 app.prepare().then(() => {
-  const server = createServer(async (req, res) => {
+  const requestHandler = (ingress: Ingress) => async (
+    req: IncomingMessage,
+    res: ServerResponse,
+  ) => {
+    stampIngress(req, ingress)
     const url = new URL(req.url ?? "", "http://localhost")
 
     // List the caller's live terminal sessions (used to prune stale tabs).
@@ -95,11 +136,14 @@ app.prepare().then(() => {
     }
 
     await handle(req, res)
-  })
+  }
+
+  const server = createServer(requestHandler("trusted"))
 
   const wss = new WebSocketServer({ noServer: true })
 
   server.on("upgrade", async (req: IncomingMessage, socket, head) => {
+    stampIngress(req, "trusted")
     const url = new URL(req.url ?? "", "http://localhost")
 
     if (url.pathname !== "/api/terminal/ws") {
@@ -205,6 +249,27 @@ app.prepare().then(() => {
   }
 
   server.listen(port, hostname, () => {
-    console.log(`> Ready on http://${hostname === "0.0.0.0" ? "localhost" : hostname}:${port}`)
+    console.log(
+      `> Ready on http://${hostname === "0.0.0.0" ? "localhost" : hostname}:${port} (trusted ingress: on-box + Tailscale Serve)`,
+    )
   })
+
+  if (publicPort) {
+    const publicServer = createServer(requestHandler("public"))
+
+    // No terminal WebSocket here at any price. The HTTP endpoints already
+    // refuse public ingress via `authAdmin`, but a PTY upgrade path is worth
+    // refusing structurally rather than on a check that a later edit could
+    // loosen — there is no reason for this socket to speak the protocol at all.
+    publicServer.on("upgrade", (_req, socket) => {
+      socket.write("HTTP/1.1 404 Not Found\r\n\r\n")
+      socket.destroy()
+    })
+
+    publicServer.listen(publicPort, publicHostname, () => {
+      console.log(
+        `> Ready on http://${publicHostname}:${publicPort} (public ingress: LAN + Funnel, admin surface refused)`,
+      )
+    })
+  }
 })

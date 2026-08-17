@@ -15,6 +15,29 @@
  * Configure with `REACH_TAILNET_ADMIN_LOGINS` (comma-separated, e.g.
  * `reganc@github`). Leaving it empty disables the check entirely.
  *
+ * ## Ingress classes
+ *
+ * Reach listens on two sockets, and which socket a request arrived on is the
+ * root of this gate's trust:
+ *
+ * - **trusted** — `127.0.0.1:$PORT`. Reachable only by processes on this box
+ *   and by Tailscale Serve, which proxies from loopback after authenticating
+ *   the peer at the WireGuard layer and stamping its identity headers.
+ * - **public** — `0.0.0.0:$REACH_PUBLIC_PORT`. The LAN, and Tailscale Funnel's
+ *   proxy target for the public internet. Never admin, full stop.
+ *
+ * `server.ts` stamps `x-reach-ingress` from the listening socket and overwrites
+ * whatever the client sent, so unlike an `X-Forwarded-*` heuristic it cannot be
+ * forged from the far side. That distinction is the whole point: once reach
+ * binds a non-loopback interface, any LAN client can claim
+ * `X-Forwarded-For: 127.0.0.1` and inherit on-box trust. The socket cannot lie.
+ *
+ * **Config invariant:** Tailscale Funnel must target the *public* port, never
+ * the trusted one. Funnel proxies from loopback and carries no tailnet
+ * identity, so a funnel pointed at the trusted socket would look like an on-box
+ * request. `isDirectLoopback` below is the second line of defence against
+ * exactly that misconfiguration.
+ *
  * Two callers, two runtimes: `middleware.ts` (edge — `process.env` is inlined
  * at build time, so changes need `npm run deploy`, not just a restart) and
  * `server.ts` (Node — reads the live environment). The env lookup is
@@ -25,6 +48,22 @@
 
 /** A header lookup, so this works with both `Headers` and Node's header bag. */
 type HeaderLookup = (name: string) => string | undefined
+
+/** Which listening socket a request arrived on. See "Ingress classes" above. */
+export type Ingress = "trusted" | "public"
+
+/**
+ * Server-stamped ingress class. Always overwritten by `server.ts` on the way
+ * in, so a client-supplied value never survives to be read here.
+ */
+export const INGRESS_HEADER = "x-reach-ingress"
+
+/** Identity headers Tailscale Serve injects — stripped on public ingress. */
+export const TAILSCALE_IDENTITY_HEADERS = [
+  "tailscale-user-login",
+  "tailscale-user-name",
+  "tailscale-user-profile-pic",
+] as const
 
 function allowedLogins(): readonly string[] {
   return (process.env.REACH_TAILNET_ADMIN_LOGINS ?? "")
@@ -85,18 +124,24 @@ function isDirectLoopback(get: HeaderLookup): boolean {
 }
 
 /**
- * Decide whether a request carries an acceptable tailnet identity.
+ * Decide whether a request may reach the admin surface.
  *
- * - No allowlist configured → gate is off, allow.
+ * - Public ingress (LAN / Funnel) → reject, unconditionally. This is checked
+ *   before the allowlist so that an empty `REACH_TAILNET_ADMIN_LOGINS` cannot
+ *   hand a shell to the internet: turning the allowlist off is a decision about
+ *   which *tailnet users* to trust, never a decision to trust the LAN.
+ * - No allowlist configured → gate is off, allow (trusted ingress only).
  * - Identity present → must be on the allowlist.
- * - Identity absent, request came through a proxy → reject. Fails closed if
- *   reach is ever fronted by something that isn't Tailscale Serve — including
- *   Tailscale Funnel, which carries no tailnet identity.
- * - Identity absent, direct loopback → allow. The unit binds 127.0.0.1, so
- *   reaching it that way already means shell access on the box; there is
- *   nothing left to protect at that point.
+ * - Identity absent, request came through a proxy → reject. Fails closed if the
+ *   trusted socket is ever fronted by something that isn't Tailscale Serve —
+ *   including Tailscale Funnel, which carries no tailnet identity.
+ * - Identity absent, direct loopback → allow. The trusted socket binds
+ *   127.0.0.1, so reaching it that way already means shell access on the box;
+ *   there is nothing left to protect at that point.
  */
 function check(get: HeaderLookup): boolean {
+  if (get(INGRESS_HEADER) !== "trusted") return false
+
   const allowed = allowedLogins()
   if (allowed.length === 0) return true
 

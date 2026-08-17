@@ -3,7 +3,7 @@
 import { signOut } from "next-auth/react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Layers, LayoutGrid, Settings, LogOut, Activity, FolderUp, Compass, BarChart3 } from "lucide-react"
+import { Layers, LayoutGrid, Settings, LogOut, Activity, FolderUp, Compass, BarChart3, ShieldOff } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 interface NavProps {
@@ -12,11 +12,18 @@ interface NavProps {
     email?: string | null
     role?: string
   }
+  /**
+   * Whether this request arrived somewhere the admin surface answers — i.e. over
+   * the tailnet with an approved identity, or from this box. False on the LAN and
+   * the public URL, where those routes are refused.
+   */
+  adminSurfaceReachable: boolean
 }
 
-export default function Nav({ user }: NavProps) {
+export default function Nav({ user, adminSurfaceReachable }: NavProps) {
   const pathname = usePathname()
   const isAdmin = user.role === "ADMIN"
+  const showAdmin = isAdmin && adminSurfaceReachable
 
   const initials = user.name
     ? user.name.split(" ").map((n) => n[0]).join("").toUpperCase().slice(0, 2)
@@ -40,7 +47,7 @@ export default function Nav({ user }: NavProps) {
           label="Apps"
           active={pathname === "/"}
         />
-        {isAdmin && (
+        {showAdmin && (
           <>
             <NavItem
               href="/portfolio"
@@ -73,6 +80,19 @@ export default function Nav({ user }: NavProps) {
               active={pathname.startsWith("/admin")}
             />
           </>
+        )}
+
+        {isAdmin && !adminSurfaceReachable && (
+          <div className="mt-3 mx-1 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-2">
+            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+              <ShieldOff className="w-3.5 h-3.5 shrink-0" />
+              Admin tools hidden
+            </div>
+            <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground/70">
+              Console, Files and Manage need a Tailscale connection. Open reach on
+              the tailnet to use them.
+            </p>
+          </div>
         )}
       </nav>
 
