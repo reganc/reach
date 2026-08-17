@@ -99,6 +99,11 @@ function ensureTmuxOptions(): Promise<void> {
       // Copy-mode selections are emitted as OSC 52 so the browser terminal can
       // forward them to the system clipboard.
       "set", "-s", "set-clipboard", "on", ";",
+      // tmux binds right-click to its own pane menu (Copy Line / Kill /
+      // Respawn / Mark …). In a browser terminal that menu is both useless and
+      // confusing — it appears on top of Chrome's own context menu, and it has
+      // no paste entry. Drop it so right-click belongs to the page.
+      "unbind", "-n", "MouseDown3Pane", ";",
       "set", "-s", "exit-empty", "off",
     ])
       .then(() => undefined)
@@ -123,12 +128,42 @@ export interface Transport {
   close: () => void
 }
 
+/**
+ * DEC private modes worth re-establishing when a client reattaches.
+ *
+ * These are negotiated *once*, at shell/tmux startup, and then never repeated:
+ * bracketed paste (2004), mouse reporting (1000/1002/1003/1006/…), cursor-key
+ * mode (1), the alternate screen (1049) and cursor visibility (25). The replay
+ * buffer is a rolling window that evicts its oldest bytes, so on any session
+ * that has outlived MAX_BUFFER those one-shot sequences are gone — and since a
+ * reattach constructs a brand new xterm.js Terminal with all of them back at
+ * their defaults, the terminal silently loses capabilities it had a moment ago.
+ *
+ * The visible symptom is paste: with 2004 lost, xterm stops wrapping pastes in
+ * ESC[200~/201~, so a multi-line paste is delivered to readline as a series of
+ * plain newlines and every line executes on arrival instead of landing in the
+ * edit buffer as text.
+ */
+const RESTORE_MODES = new Set([1, 25, 1000, 1002, 1003, 1005, 1006, 1015, 1016, 1049, 2004])
+
+/** Longest private-mode sequence we expect, used to size the split-chunk carry. */
+const MODE_CARRY = 32
+const PRIVATE_MODE_RE = /\x1b\[\?([\d;]+)([hl])/g
+
 interface TermSession {
   id: string
   ownerId: string
   pty: IPty
   /** Rolling scrollback, capped at MAX_BUFFER chars, replayed on reattach. */
   buffer: string
+  /**
+   * Current state of every RESTORE_MODES private mode the PTY has negotiated,
+   * tracked separately from `buffer` precisely because it must survive the
+   * buffer's eviction window.
+   */
+  modes: Map<number, boolean>
+  /** Tail of the last chunk, so a mode sequence split across chunks still parses. */
+  modeCarry: string
   /** The currently attached transport, or null while detached. */
   transport: Transport | null
   cols: number
@@ -137,6 +172,36 @@ interface TermSession {
   detachedAt: number | null
   reaper: ReturnType<typeof setTimeout> | null
   alive: boolean
+}
+
+/** Fold any private-mode changes in `data` into the session's mode state. */
+function trackModes(session: TermSession, data: string) {
+  const scan = session.modeCarry + data
+  PRIVATE_MODE_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = PRIVATE_MODE_RE.exec(scan)) !== null) {
+    const enabled = m[2] === "h"
+    for (const part of m[1].split(";")) {
+      const code = Number(part)
+      if (RESTORE_MODES.has(code)) session.modes.set(code, enabled)
+    }
+  }
+  // Re-scanning a sequence that stays in the carry is harmless: matches are
+  // applied in order, so the newest value always wins.
+  session.modeCarry = scan.slice(-MODE_CARRY)
+}
+
+/**
+ * Sequences that put a freshly-created terminal back into the modes this
+ * session is actually in, emitted ahead of the buffer replay.
+ */
+function modePrefix(session: TermSession): string {
+  const enabled = [...session.modes.entries()].filter(([, on]) => on).map(([code]) => code)
+  if (enabled.length === 0) return ""
+  // Alt-screen first, so every other mode applies to the screen the replayed
+  // repaint actually paints into.
+  enabled.sort((a, b) => (a === 1049 ? -1 : b === 1049 ? 1 : a - b))
+  return enabled.map((code) => `\x1b[?${code}h`).join("")
 }
 
 // Survive tsx-watch reloads / repeated imports: keep one registry per process.
@@ -257,6 +322,8 @@ export async function attachOrCreate(opts: AttachOptions): Promise<{ restored: b
       ownerId,
       pty: ptyProcess,
       buffer: "",
+      modes: new Map(),
+      modeCarry: "",
       transport: null,
       cols: clampCols(cols),
       rows: clampRows(rows),
@@ -268,6 +335,9 @@ export async function attachOrCreate(opts: AttachOptions): Promise<{ restored: b
     sessions.set(sessionId, created)
 
     ptyProcess.onData((data: string) => {
+      // Track modes before the buffer trims: these sequences are emitted once
+      // at startup and must outlive the eviction window.
+      trackModes(created, data)
       created.buffer += data
       if (created.buffer.length > MAX_BUFFER) {
         created.buffer = created.buffer.slice(created.buffer.length - MAX_BUFFER)
@@ -295,7 +365,10 @@ export async function attachOrCreate(opts: AttachOptions): Promise<{ restored: b
 
   // Snapshot + attach in one synchronous step so no PTY output can interleave
   // between reading the buffer and registering the live transport (no dup/loss).
-  const replay = session.buffer
+  // Re-establish negotiated modes ahead of the bytes: the client attaching here
+  // is a brand new terminal at its defaults, and the buffer may no longer carry
+  // the one-shot sequences that set them.
+  const replay = session.buffer ? modePrefix(session) + session.buffer : session.buffer
   session.transport = transport
   session.cols = clampCols(cols)
   session.rows = clampRows(rows)
@@ -333,6 +406,25 @@ export function detach(sessionId: string, transport: Transport) {
 export function write(sessionId: string, ownerId: string, data: string) {
   const s = sessions.get(sessionId)
   if (s && s.ownerId === ownerId && s.alive) s.pty.write(data)
+}
+
+/**
+ * Leave tmux copy-mode, if the pane happens to be in it.
+ *
+ * Mouse mode means one scroll of the wheel puts the pane into copy-mode, where
+ * tmux interprets keystrokes as copy-mode commands and never forwards them to
+ * the shell. Nothing on screen says so — reach turns the status bar off — so
+ * the terminal simply appears to swallow whatever you type or paste until you
+ * scroll all the way back to the bottom.
+ *
+ * `send-keys -X cancel` is a no-op outside a mode, so this is safe to call
+ * unconditionally rather than querying `pane_in_mode` first (which would cost
+ * a second subprocess and still race).
+ */
+export async function exitCopyMode(sessionId: string, ownerId: string): Promise<void> {
+  const s = sessions.get(sessionId)
+  if (!s || s.ownerId !== ownerId || !s.alive || !DURABLE) return
+  await tmux(["send-keys", "-X", "-t", tmuxName(ownerId, sessionId), "cancel"])
 }
 
 export function resize(sessionId: string, ownerId: string, cols: number, rows: number) {

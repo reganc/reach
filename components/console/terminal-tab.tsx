@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState, useCallback } from "react"
-import { RotateCcw, Maximize2, Minimize2 } from "lucide-react"
+import { RotateCcw, Maximize2, Minimize2, ClipboardPaste } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 type Status = "connecting" | "connected" | "disconnected" | "exited"
@@ -21,6 +21,14 @@ async function copyText(text: string): Promise<void> {
   } catch {
     /* fall through to legacy path */
   }
+  // The legacy path has to put a real, selected textarea in the document to
+  // copy from, which moves focus off the terminal. That matters more than it
+  // looks: tmux emits OSC 52 on every copy-mode selection, and this path runs
+  // whenever the async clipboard is unavailable — including the common case of
+  // an OSC 52 arriving with no user activation behind it. Leaving focus on a
+  // removed textarea is what makes a subsequent Ctrl+V go nowhere, so restore
+  // the previous element synchronously, before yielding.
+  const previous = document.activeElement as HTMLElement | null
   const ta = document.createElement("textarea")
   ta.value = text
   ta.style.position = "fixed"
@@ -33,6 +41,34 @@ async function copyText(text: string): Promise<void> {
     /* clipboard unavailable — nothing else we can do */
   }
   ta.remove()
+  previous?.focus?.()
+}
+
+/**
+ * Paste the system clipboard into the terminal.
+ *
+ * Routed through `term.paste()` rather than the socket directly so xterm still
+ * wraps the text in ESC[200~/201~ when the application has bracketed paste on —
+ * writing to the socket ourselves would strip that and make every line of a
+ * multi-line paste execute on arrival.
+ */
+async function pasteFromClipboard(
+  send: (text: string) => void,
+  term: import("@xterm/xterm").Terminal,
+): Promise<boolean> {
+  try {
+    if (!window.isSecureContext || !navigator.clipboard?.readText) return false
+    const text = await navigator.clipboard.readText()
+    if (text) send(text)
+    return true
+  } catch {
+    // Chrome gates clipboard *reads* behind a permission prompt, so this is a
+    // routine denial, not a bug. Ctrl+V still works without it: the browser
+    // hands the data straight to xterm's textarea in the paste event.
+    return false
+  } finally {
+    term.focus()
+  }
 }
 
 interface Props {
@@ -46,9 +82,12 @@ export function TerminalTab({ active, sessionId }: Props) {
   const wsRef = useRef<WebSocket | null>(null)
   const fitRef = useRef<(() => void) | null>(null)
   const termRef = useRef<import("@xterm/xterm").Terminal | null>(null)
+  /** Paste text into the live terminal, tagged so the server clears copy-mode. */
+  const pasteRef = useRef<((text: string) => void) | null>(null)
   const [status, setStatus] = useState<Status>("connecting")
   const [restored, setRestored] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const [pasteHint, setPasteHint] = useState<string | null>(null)
   const cleanupRef = useRef<(() => void) | null>(null)
 
   const connect = useCallback(() => {
@@ -121,6 +160,16 @@ export function TerminalTab({ active, sessionId }: Props) {
           void copyText(term.getSelection()).finally(() => term.focus())
           return false
         }
+        // Ctrl+Shift+V, the terminal convention. xterm has no binding of its
+        // own for it, and tmux's mouse mode swallows the middle-click and
+        // right-click paths, so without this the only way in is plain Ctrl+V.
+        // preventDefault stops the browser also firing its own paste event,
+        // which would deliver the clipboard twice.
+        if (e.ctrlKey && e.shiftKey && (e.key === "v" || e.key === "V")) {
+          e.preventDefault()
+          void pasteFromClipboard((t) => pasteRef.current?.(t), term)
+          return false
+        }
         return true
       })
 
@@ -180,9 +229,29 @@ export function TerminalTab({ active, sessionId }: Props) {
         if (mounted) setStatus("disconnected")
       }
 
+      // Pastes are tagged so the server can drop out of tmux copy-mode first;
+      // a scroll of the wheel is enough to enter it, and there it would eat the
+      // paste silently. term.paste() dispatches synchronously, so the flag only
+      // has to survive that call. The capture-phase listener covers the native
+      // Ctrl+V route, where xterm's own textarea handler is the event target.
+      let pasting = false
+      const sendPaste = (text: string) => {
+        if (!text) return
+        pasting = true
+        try { term.paste(text) } finally { pasting = false }
+      }
+      pasteRef.current = sendPaste
+
+      const onNativePaste = () => {
+        pasting = true
+        setTimeout(() => { pasting = false }, 0)
+      }
+      const container = containerRef.current!
+      container.addEventListener("paste", onNativePaste, true)
+
       term.onData((data) => {
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "input", data }))
+          ws.send(JSON.stringify({ type: pasting ? "paste" : "input", data }))
         }
       })
 
@@ -202,9 +271,33 @@ export function TerminalTab({ active, sessionId }: Props) {
       })
       ro.observe(containerRef.current!)
 
+      // Middle-click paste. tmux's mouse mode consumes the middle click before
+      // the browser's own paste behaviour would apply, and page JS cannot read
+      // the X11 PRIMARY selection regardless — so this pastes the system
+      // clipboard, which is the closest thing available to the Linux habit.
+      const onAuxClick = (ev: MouseEvent) => {
+        if (ev.button !== 1) return
+        ev.preventDefault()
+        void pasteFromClipboard(sendPaste, term)
+      }
+      container.addEventListener("auxclick", onAuxClick)
+
+      // Right-click pastes, the way PuTTY and Windows Terminal do. tmux's own
+      // pane menu is unbound server-side, and Chrome's menu offers no Paste
+      // here because the click lands on xterm's canvas rather than an editable
+      // field — so without this there is no working right-click path at all.
+      const onContextMenu = (ev: MouseEvent) => {
+        ev.preventDefault()
+        void pasteFromClipboard(sendPaste, term)
+      }
+      container.addEventListener("contextmenu", onContextMenu)
+
       cleanupRef.current = () => {
         mounted = false
         fitRef.current = null
+        container.removeEventListener("auxclick", onAuxClick)
+        container.removeEventListener("contextmenu", onContextMenu)
+        container.removeEventListener("paste", onNativePaste, true)
         if (termRef.current === term) termRef.current = null
         if (resizeTimer) clearTimeout(resizeTimer)
         ro.disconnect()
@@ -271,9 +364,28 @@ export function TerminalTab({ active, sessionId }: Props) {
           </span>
         </div>
 
-        <div className="flex-1 text-center text-xs text-zinc-600 font-mono">bash</div>
+        <div className="flex-1 text-center text-xs font-mono">
+          {pasteHint
+            ? <span className="text-amber-500/80">{pasteHint}</span>
+            : <span className="text-zinc-600">bash</span>}
+        </div>
 
         <div className="flex items-center gap-1">
+          {status === "connected" && (
+            <button
+              onClick={async () => {
+                const term = termRef.current
+                if (!term) return
+                const ok = await pasteFromClipboard((t) => pasteRef.current?.(t), term)
+                setPasteHint(ok ? null : "Clipboard blocked — use Ctrl+V")
+                if (!ok) setTimeout(() => setPasteHint(null), 4000)
+              }}
+              title="Paste clipboard (Ctrl+Shift+V, or right-click)"
+              className="flex items-center justify-center w-6 h-6 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+            >
+              <ClipboardPaste className="w-3.5 h-3.5" />
+            </button>
+          )}
           {(status === "disconnected" || status === "exited") && (
             <button
               onClick={connect}

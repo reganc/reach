@@ -171,6 +171,11 @@ app.prepare().then(() => {
       return
     }
 
+    // Messages are handled on a promise chain so ordering survives the one
+    // async case (paste, which has to leave copy-mode before it writes).
+    // Without it a keystroke sent right behind a paste could overtake it.
+    let queue: Promise<void> = Promise.resolve()
+
     ws.on("message", (raw: Buffer) => {
       let msg: { type?: string; data?: string; cols?: number; rows?: number }
       try {
@@ -178,11 +183,18 @@ app.prepare().then(() => {
       } catch {
         return
       }
-      if (msg.type === "input" && typeof msg.data === "string") {
-        store.write(sessionId, owner, msg.data)
-      } else if (msg.type === "resize") {
-        store.resize(sessionId, owner, Number(msg.cols), Number(msg.rows))
-      }
+      queue = queue.then(async () => {
+        if (msg.type === "input" && typeof msg.data === "string") {
+          store.write(sessionId, owner, msg.data)
+        } else if (msg.type === "paste" && typeof msg.data === "string") {
+          // A paste has to land as shell input even if a stray scroll left the
+          // pane in copy-mode, where tmux would otherwise eat it silently.
+          await store.exitCopyMode(sessionId, owner)
+          store.write(sessionId, owner, msg.data)
+        } else if (msg.type === "resize") {
+          store.resize(sessionId, owner, Number(msg.cols), Number(msg.rows))
+        }
+      }).catch(() => { /* one bad message must not wedge the queue */ })
     })
 
     // Socket closed → detach only. The PTY keeps running so the session
