@@ -1,75 +1,45 @@
 "use client"
 
 import { useEffect, useRef, useState, useCallback } from "react"
-import { RotateCcw, Maximize2, Minimize2, ClipboardPaste } from "lucide-react"
+import { AnimatePresence, motion } from "framer-motion"
+import {
+  RotateCcw,
+  Maximize2,
+  Minimize2,
+  ClipboardPaste,
+  Copy,
+  Keyboard,
+  Check,
+  AlertCircle,
+} from "lucide-react"
 import { cn } from "@/lib/utils"
+import {
+  clipboardActionFor,
+  copyText,
+  decodeOsc52,
+  describeCopy,
+  isMac,
+  readClipboard,
+} from "@/lib/terminal/clipboard"
 
 type Status = "connecting" | "connected" | "disconnected" | "exited"
 
-/**
- * Copy to the system clipboard, falling back to execCommand for non-secure
- * contexts (this app is often reached over plain-http LAN, where
- * navigator.clipboard is unavailable).
- */
-async function copyText(text: string): Promise<void> {
-  if (!text) return
-  try {
-    if (window.isSecureContext && navigator.clipboard) {
-      await navigator.clipboard.writeText(text)
-      return
-    }
-  } catch {
-    /* fall through to legacy path */
-  }
-  // The legacy path has to put a real, selected textarea in the document to
-  // copy from, which moves focus off the terminal. That matters more than it
-  // looks: tmux emits OSC 52 on every copy-mode selection, and this path runs
-  // whenever the async clipboard is unavailable — including the common case of
-  // an OSC 52 arriving with no user activation behind it. Leaving focus on a
-  // removed textarea is what makes a subsequent Ctrl+V go nowhere, so restore
-  // the previous element synchronously, before yielding.
-  const previous = document.activeElement as HTMLElement | null
-  const ta = document.createElement("textarea")
-  ta.value = text
-  ta.style.position = "fixed"
-  ta.style.opacity = "0"
-  document.body.appendChild(ta)
-  ta.select()
-  try {
-    document.execCommand("copy")
-  } catch {
-    /* clipboard unavailable — nothing else we can do */
-  }
-  ta.remove()
-  previous?.focus?.()
+interface Notice {
+  id: number
+  text: string
+  tone: "ok" | "warn"
 }
 
-/**
- * Paste the system clipboard into the terminal.
- *
- * Routed through `term.paste()` rather than the socket directly so xterm still
- * wraps the text in ESC[200~/201~ when the application has bracketed paste on —
- * writing to the socket ourselves would strip that and make every line of a
- * multi-line paste execute on arrival.
- */
-async function pasteFromClipboard(
-  send: (text: string) => void,
-  term: import("@xterm/xterm").Terminal,
-): Promise<boolean> {
-  try {
-    if (!window.isSecureContext || !navigator.clipboard?.readText) return false
-    const text = await navigator.clipboard.readText()
-    if (text) send(text)
-    return true
-  } catch {
-    // Chrome gates clipboard *reads* behind a permission prompt, so this is a
-    // routine denial, not a bug. Ctrl+V still works without it: the browser
-    // hands the data straight to xterm's textarea in the paste event.
-    return false
-  } finally {
-    term.focus()
-  }
-}
+const PASTE_KEY = isMac ? "⌘V" : "Ctrl+V"
+const COPY_KEY = isMac ? "⌘C" : "Ctrl+Shift+C"
+
+const SHORTCUTS: { label: string; keys: string[] }[] = [
+  { label: "Copy", keys: ["Drag to select — copies on release", `${COPY_KEY} or right-click a selection`] },
+  { label: "Paste", keys: [`${PASTE_KEY}${isMac ? "" : " or Ctrl+Shift+V"}`, "Right-click or middle-click"] },
+  { label: "Word / line", keys: ["Double-click / triple-click copies it"] },
+  { label: "Inside vim, htop…", keys: [`Hold ${isMac ? "⌥" : "Shift"} while dragging, then ${COPY_KEY}`] },
+  { label: "Scrollback", keys: ["Mouse wheel · type or paste to jump back"] },
+]
 
 interface Props {
   active: boolean
@@ -84,16 +54,58 @@ export function TerminalTab({ active, sessionId }: Props) {
   const termRef = useRef<import("@xterm/xterm").Terminal | null>(null)
   /** Paste text into the live terminal, tagged so the server clears copy-mode. */
   const pasteRef = useRef<((text: string) => void) | null>(null)
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [status, setStatus] = useState<Status>("connecting")
   const [restored, setRestored] = useState(false)
   const [expanded, setExpanded] = useState(false)
-  const [pasteHint, setPasteHint] = useState<string | null>(null)
+  const [hasSelection, setHasSelection] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
+  const [notice, setNotice] = useState<Notice | null>(null)
   const cleanupRef = useRef<(() => void) | null>(null)
+
+  const flash = useCallback((text: string, tone: Notice["tone"] = "ok") => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current)
+    setNotice({ id: Date.now(), text, tone })
+    noticeTimer.current = setTimeout(() => setNotice(null), tone === "ok" ? 1800 : 4500)
+  }, [])
+
+  useEffect(() => () => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current)
+  }, [])
+
+  /** Copy xterm's own selection (Shift+drag), with feedback. */
+  const copySelection = useCallback(async () => {
+    const term = termRef.current
+    if (!term) return
+    const text = term.getSelection()
+    if (!text) {
+      flash("Nothing selected — drag across text to copy it", "warn")
+    } else if (await copyText(text)) {
+      flash(describeCopy(text))
+    } else {
+      flash("Browser blocked the clipboard", "warn")
+    }
+    term.focus()
+  }, [flash])
+
+  /** Explicit paste affordances — needs clipboard-read permission. */
+  const pasteClipboard = useCallback(async () => {
+    const term = termRef.current
+    if (!term) return
+    const text = await readClipboard()
+    term.focus()
+    if (text === null) {
+      flash(`Clipboard access blocked — press ${PASTE_KEY} instead`, "warn")
+    } else if (text) {
+      pasteRef.current?.(text)
+    }
+  }, [flash])
 
   const connect = useCallback(() => {
     cleanupRef.current?.()
     setStatus("connecting")
     setRestored(false)
+    setHasSelection(false)
 
     let mounted = true
     // Set preliminary cleanup immediately so StrictMode double-invocation cancels the in-flight init
@@ -143,6 +155,9 @@ export function TerminalTab({ active, sessionId }: Props) {
         cursorStyle: "block",
         scrollback: 5000,
         allowTransparency: false,
+        // ⌥+drag forces a local selection on macOS, matching Shift+drag elsewhere,
+        // for when the program in the pane has captured the mouse.
+        macOptionClickForcesSelection: true,
       })
 
       const fitAddon = new FitAddon()
@@ -152,38 +167,42 @@ export function TerminalTab({ active, sessionId }: Props) {
       fitAddon.fit()
       termRef.current = term
 
-      // Ctrl+C copies when text is selected (VS Code behavior); with no
-      // selection it falls through to the shell as SIGINT.
+      term.onSelectionChange(() => setHasSelection(term.hasSelection()))
+
       term.attachCustomKeyEventHandler((e) => {
         if (e.type !== "keydown") return true
-        if ((e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C") && term.hasSelection()) {
-          void copyText(term.getSelection()).finally(() => term.focus())
+        const action = clipboardActionFor(e, term.hasSelection())
+        if (action === "copy") {
+          // Also swallows Ctrl+Shift+C with nothing selected, which xterm
+          // would otherwise send to the shell as a surprise SIGINT.
+          e.preventDefault()
+          void copySelection()
           return false
         }
-        // Ctrl+Shift+V, the terminal convention. xterm has no binding of its
-        // own for it, and tmux's mouse mode swallows the middle-click and
-        // right-click paths, so without this the only way in is plain Ctrl+V.
-        // preventDefault stops the browser also firing its own paste event,
-        // which would deliver the clipboard twice.
-        if (e.ctrlKey && e.shiftKey && (e.key === "v" || e.key === "V")) {
-          e.preventDefault()
-          void pasteFromClipboard((t) => pasteRef.current?.(t), term)
+        if (action === "paste") {
+          // Returning false without preventDefault hands the key back to the
+          // browser, which fires a native paste event on xterm's textarea.
+          // That path needs no clipboard permission, works on plain http, and
+          // keeps xterm's bracketed-paste wrapping — so multi-line pastes land
+          // in the edit buffer instead of executing line by line.
           return false
         }
         return true
       })
 
-      // OSC 52: tmux emits copy-mode selections (mouse drag → release) as an
-      // OSC 52 sequence; forward the payload to the system clipboard.
+      // OSC 52: tmux emits copy-mode selections (drag → release, double/triple
+      // click) as an OSC 52 sequence; forward the payload to the clipboard.
+      // tmux clears its highlight the instant it copies, so the notice is the
+      // only sign the copy happened at all.
       term.parser.registerOscHandler(52, (data) => {
-        const idx = data.indexOf(";")
-        const b64 = idx === -1 ? data : data.slice(idx + 1)
-        if (!b64 || b64 === "?") return true // clipboard reads are not supported
-        try {
-          const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
-          void copyText(new TextDecoder().decode(bytes)).finally(() => term.focus())
-        } catch {
-          /* malformed payload — ignore */
+        const text = decodeOsc52(data)
+        if (text) {
+          void copyText(text).then((ok) => {
+            if (!mounted) return
+            if (ok) flash(describeCopy(text))
+            else flash(`Clipboard blocked — Shift+drag to select, then ${COPY_KEY}`, "warn")
+            term.focus()
+          })
         }
         return true
       })
@@ -278,23 +297,27 @@ export function TerminalTab({ active, sessionId }: Props) {
       const onAuxClick = (ev: MouseEvent) => {
         if (ev.button !== 1) return
         ev.preventDefault()
-        void pasteFromClipboard(sendPaste, term)
+        void pasteClipboard()
       }
       container.addEventListener("auxclick", onAuxClick)
 
-      // Right-click pastes, the way PuTTY and Windows Terminal do. tmux's own
-      // pane menu is unbound server-side, and Chrome's menu offers no Paste
-      // here because the click lands on xterm's canvas rather than an editable
-      // field — so without this there is no working right-click path at all.
+      // Right-click copies a selection if there is one, otherwise pastes — the
+      // Windows Terminal / PuTTY convention. tmux's own pane menu is unbound
+      // server-side, and Chrome's menu offers no Paste over xterm's canvas.
       const onContextMenu = (ev: MouseEvent) => {
         ev.preventDefault()
-        void pasteFromClipboard(sendPaste, term)
+        if (term.hasSelection()) {
+          void copySelection().then(() => term.clearSelection())
+        } else {
+          void pasteClipboard()
+        }
       }
       container.addEventListener("contextmenu", onContextMenu)
 
       cleanupRef.current = () => {
         mounted = false
         fitRef.current = null
+        pasteRef.current = null
         container.removeEventListener("auxclick", onAuxClick)
         container.removeEventListener("contextmenu", onContextMenu)
         container.removeEventListener("paste", onNativePaste, true)
@@ -308,7 +331,7 @@ export function TerminalTab({ active, sessionId }: Props) {
     }
 
     init()
-  }, [sessionId])
+  }, [sessionId, flash, copySelection, pasteClipboard])
 
   useEffect(() => {
     connect()
@@ -331,8 +354,21 @@ export function TerminalTab({ active, sessionId }: Props) {
     return () => cancelAnimationFrame(raf)
   }, [active])
 
+  // Esc leaves fullscreen — but only when the terminal isn't the one that
+  // needs Esc (vim, readline), i.e. when focus is on the toolbar.
+  useEffect(() => {
+    if (!expanded) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return
+      if (containerRef.current?.contains(document.activeElement)) return
+      setExpanded(false)
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [expanded])
+
   const statusColor: Record<Status, string> = {
-    connecting: "bg-yellow-500",
+    connecting: "bg-yellow-500 animate-pulse",
     connected: "bg-emerald-500",
     disconnected: "bg-red-500",
     exited: "bg-zinc-500",
@@ -345,18 +381,23 @@ export function TerminalTab({ active, sessionId }: Props) {
     exited: "Session ended",
   }
 
+  const toolButton =
+    "flex items-center justify-center w-7 h-7 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-zinc-600"
+
   return (
     <div
       className={cn(
-        "rounded-b-xl rounded-tr-xl border border-border overflow-hidden flex flex-col bg-[#09090b]",
-        expanded && "fixed inset-4 z-50 rounded-xl shadow-2xl",
+        "relative rounded-b-xl rounded-tr-xl border border-border overflow-hidden flex flex-col bg-[#09090b]",
+        expanded
+          ? "fixed inset-4 z-50 rounded-xl shadow-2xl"
+          : "h-[calc(100dvh-10.5rem)] min-h-[360px]",
       )}
     >
       {/* Toolbar */}
-      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 bg-zinc-950 shrink-0">
-        <div className="flex items-center gap-1.5">
-          <div className={cn("w-2.5 h-2.5 rounded-full", statusColor[status])} />
-          <span className="text-xs text-zinc-400">
+      <div className="flex items-center gap-3 px-3 py-1.5 border-b border-zinc-800 bg-zinc-950 shrink-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <div className={cn("w-2 h-2 rounded-full shrink-0", statusColor[status])} />
+          <span className="text-xs text-zinc-400 truncate">
             {statusLabel[status]}
             {status === "connected" && restored && (
               <span className="text-zinc-600"> · session restored</span>
@@ -364,53 +405,120 @@ export function TerminalTab({ active, sessionId }: Props) {
           </span>
         </div>
 
-        <div className="flex-1 text-center text-xs font-mono">
-          {pasteHint
-            ? <span className="text-amber-500/80">{pasteHint}</span>
-            : <span className="text-zinc-600">bash</span>}
+        <div className="flex-1 flex justify-center min-w-0" aria-live="polite">
+          <AnimatePresence mode="wait">
+            {notice && (
+              <motion.span
+                key={notice.id}
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 4 }}
+                transition={{ duration: 0.15 }}
+                className={cn(
+                  "flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs truncate",
+                  notice.tone === "ok"
+                    ? "text-emerald-300 bg-emerald-500/10"
+                    : "text-amber-300 bg-amber-500/10",
+                )}
+              >
+                {notice.tone === "ok"
+                  ? <Check className="w-3 h-3 shrink-0" />
+                  : <AlertCircle className="w-3 h-3 shrink-0" />}
+                <span className="truncate">{notice.text}</span>
+              </motion.span>
+            )}
+          </AnimatePresence>
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
           {status === "connected" && (
-            <button
-              onClick={async () => {
-                const term = termRef.current
-                if (!term) return
-                const ok = await pasteFromClipboard((t) => pasteRef.current?.(t), term)
-                setPasteHint(ok ? null : "Clipboard blocked — use Ctrl+V")
-                if (!ok) setTimeout(() => setPasteHint(null), 4000)
-              }}
-              title="Paste clipboard (Ctrl+Shift+V, or right-click)"
-              className="flex items-center justify-center w-6 h-6 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-            >
-              <ClipboardPaste className="w-3.5 h-3.5" />
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => void copySelection()}
+                disabled={!hasSelection}
+                title={`Copy selection (${COPY_KEY})`}
+                aria-label="Copy selection"
+                className={cn(toolButton, "disabled:opacity-30 disabled:pointer-events-none")}
+              >
+                <Copy className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => void pasteClipboard()}
+                title={`Paste (${PASTE_KEY}, or right-click)`}
+                aria-label="Paste clipboard"
+                className={toolButton}
+              >
+                <ClipboardPaste className="w-3.5 h-3.5" />
+              </button>
+            </>
           )}
           {(status === "disconnected" || status === "exited") && (
             <button
+              type="button"
               onClick={connect}
               title="Reconnect"
-              className="flex items-center justify-center w-6 h-6 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+              aria-label="Reconnect"
+              className={toolButton}
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
           )}
           <button
+            type="button"
+            onClick={() => setShowHelp((v) => !v)}
+            title="Copy & paste shortcuts"
+            aria-label="Copy and paste shortcuts"
+            aria-expanded={showHelp}
+            className={cn(toolButton, showHelp && "text-zinc-100 bg-zinc-800")}
+          >
+            <Keyboard className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
             onClick={() => setExpanded((v) => !v)}
             title={expanded ? "Exit fullscreen" : "Fullscreen"}
-            className="flex items-center justify-center w-6 h-6 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+            aria-label={expanded ? "Exit fullscreen" : "Fullscreen"}
+            className={toolButton}
           >
             {expanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
           </button>
         </div>
       </div>
 
+      <AnimatePresence>
+        {showHelp && (
+          <motion.div
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.15 }}
+            className="absolute right-3 top-11 z-20 w-80 rounded-lg border border-zinc-800 bg-zinc-950/95 backdrop-blur p-3 shadow-2xl"
+          >
+            <p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-2">
+              Clipboard
+            </p>
+            <dl className="space-y-2">
+              {SHORTCUTS.map((s) => (
+                <div key={s.label} className="grid grid-cols-[5.5rem_1fr] gap-2 text-xs">
+                  <dt className="text-zinc-500">{s.label}</dt>
+                  <dd className="space-y-0.5 text-zinc-300">
+                    {s.keys.map((k) => <div key={k}>{k}</div>)}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Terminal container */}
       <div
         ref={containerRef}
-        className="flex-1 p-2"
-        style={{ minHeight: expanded ? undefined : 480 }}
+        className="flex-1 min-h-0 p-2"
         onClick={() => {
+          setShowHelp(false)
           // Focus via xterm's API (avoids scroll jumps from raw textarea.focus),
           // and never while a selection exists — stealing focus there would
           // clear the selection before the user can copy it.

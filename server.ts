@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from "ws"
 import { getToken } from "next-auth/jwt"
 import type { IncomingMessage, ServerResponse } from "http"
 import * as store from "./lib/terminal/session-store"
+import { isMouseReport, isWheelUp } from "./lib/terminal/mouse"
 import {
   hasAllowedTailnetIdentityNode,
   INGRESS_HEADER,
@@ -219,6 +220,9 @@ app.prepare().then(() => {
     // async case (paste, which has to leave copy-mode before it writes).
     // Without it a keystroke sent right behind a paste could overtake it.
     let queue: Promise<void> = Promise.resolve()
+    // Set once a wheel-up report reaches tmux: from then until the next real
+    // keystroke the pane may be scrolled back in copy-mode, which eats typing.
+    let maybeInCopyMode = false
 
     ws.on("message", (raw: Buffer) => {
       let msg: { type?: string; data?: string; cols?: number; rows?: number }
@@ -229,8 +233,18 @@ app.prepare().then(() => {
       }
       queue = queue.then(async () => {
         if (msg.type === "input" && typeof msg.data === "string") {
+          if (isWheelUp(msg.data)) {
+            maybeInCopyMode = true
+          } else if (maybeInCopyMode && !isMouseReport(msg.data)) {
+            // Typing after scrolling back should reach the shell, the way it
+            // does in every other terminal, rather than vanish into copy-mode
+            // commands. Only paid once per scroll, not per keystroke.
+            maybeInCopyMode = false
+            await store.exitCopyMode(sessionId, owner)
+          }
           store.write(sessionId, owner, msg.data)
         } else if (msg.type === "paste" && typeof msg.data === "string") {
+          maybeInCopyMode = false
           // A paste has to land as shell input even if a stray scroll left the
           // pane in copy-mode, where tmux would otherwise eat it silently.
           await store.exitCopyMode(sessionId, owner)

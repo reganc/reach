@@ -38,6 +38,34 @@ considered]
 this beyond opinion]
 ```
 
+## 2026-09-26 — Terminal: Ctrl+V pastes via the native paste event
+
+**Context:** Copy/paste in the console terminal was unreliable. xterm.js
+translates Ctrl+V into the `^V` control byte and `preventDefault`s it, so the
+browser never fired a paste event — while the code and the UI hint both assumed
+Ctrl+V was the working fallback. Every other paste path used
+`navigator.clipboard.readText()`, which Chrome gates behind a permission
+prompt; one dismissal left no working paste at all.
+
+**Decision:** The custom key handler hands Ctrl+V / Ctrl+Shift+V back to the
+browser (return `false` without `preventDefault`), so xterm's textarea gets a
+native paste event. Copy gained Ctrl+Shift+C, right-click-copies-a-selection,
+and visible feedback for every copy (tmux clears its highlight on copy, so
+there was previously no sign it worked). The server also drops tmux out of
+copy-mode on the first keystroke after a wheel-up, since mouse-mode scrolling
+otherwise made typing vanish.
+
+**Why:** The native paste event needs no permission, works in non-secure
+contexts, and keeps bracketed paste. The cost is that Ctrl+V no longer sends
+readline's literal-next (`^V`) — the same trade VS Code and Windows Terminal
+make. The copy-mode exit is keyed off wheel reports rather than run per
+keystroke to avoid a tmux subprocess on every key; it does mean a key typed
+while scrolled back reaches the shell instead of acting as a copy-mode command.
+
+**Evidence:** `tests/terminal.test.ts` (`npm test`); Chromium + real xterm.js
+6.0 harness: before, Ctrl+V → `"\u0016"`; after, Ctrl+V and Ctrl+Shift+V →
+`"\u001b[200~echo one\recho two\u001b[201~"`.
+
 ---
 
 ## 2026-08-17 — Ingress class, not forwarded headers, decides admin access

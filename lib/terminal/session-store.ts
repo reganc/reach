@@ -34,6 +34,7 @@ import path from "path"
 import { execFile, spawnSync } from "child_process"
 import { createHash } from "crypto"
 import type { IPty } from "node-pty"
+import { describePane } from "./pane-title"
 
 const MAX_BUFFER = Number(process.env.TERMINAL_SCROLLBACK_BYTES ?? 256 * 1024)
 const IDLE_TTL_MS = Number(process.env.TERMINAL_IDLE_TTL_MS ?? 6 * 60 * 60 * 1000)
@@ -479,6 +480,8 @@ export interface SessionInfo {
   alive: boolean
   attached: boolean
   createdAt: number
+  /** Short human label — foreground command and/or working dir (tmux only). */
+  title?: string
 }
 
 /**
@@ -501,16 +504,24 @@ export async function listFor(ownerId: string): Promise<SessionInfo[]> {
   }
 
   if (DURABLE) {
-    const { code, stdout } = await tmux(["list-sessions", "-F", "#{session_name}"])
+    // Tab-separated so paths with spaces survive; the pane fields describe
+    // each session's active pane, which is the only one reach ever creates.
+    const { code, stdout } = await tmux([
+      "list-sessions",
+      "-F",
+      "#{session_name}\t#{pane_current_command}\t#{pane_current_path}",
+    ])
     if (code === 0) {
       const prefix = `${TMUX_PREFIX}${ownerTag(ownerId)}-`
       for (const line of stdout.split("\n")) {
-        const name = line.trim()
+        const [name = "", command = "", cwd = ""] = line.split("\t")
         if (!name.startsWith(prefix)) continue
         const id = name.slice(prefix.length)
-        if (id && !result.has(id)) {
-          result.set(id, { id, alive: true, attached: false, createdAt: 0 })
-        }
+        if (!id) continue
+        const title = describePane(command, cwd, process.env.HOME ?? os.homedir())
+        const known = result.get(id)
+        if (known) result.set(id, { ...known, title })
+        else result.set(id, { id, alive: true, attached: false, createdAt: 0, title })
       }
     }
   }

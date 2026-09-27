@@ -104,32 +104,48 @@ export function ConsoleShell() {
     }
   }, [sessions, activeSessionId])
 
-  // Discover live server-side sessions this client doesn't know about (e.g. a
-  // shell left running before sessionStorage was cleared) and surface them as
-  // tabs. Purely additive — never prunes freshly-created local sessions.
+  // Sync with the server's view of our shells: surface live sessions this
+  // client doesn't know about (e.g. left running before sessionStorage was
+  // cleared) and keep each tab's label current with what's running in it.
+  // Purely additive — never prunes freshly-created local sessions. Polls only
+  // while the terminal tab is on screen and the page is visible.
   useEffect(() => {
     let cancelled = false
-    fetch("/api/terminal/sessions")
-      .then((r) => (r.ok ? r.json() : { sessions: [] }))
-      .then((data: { sessions?: { id: string; alive: boolean }[] }) => {
-        if (cancelled) return
-        const live = (data.sessions ?? []).filter((s) => s.alive).map((s) => s.id)
-        setState((prev) => {
-          const known = new Set(prev.sessions.map((s) => s.id))
-          const discovered = live
-            .filter((id) => !known.has(id))
-            .map((id) => ({ id, label: "bash" }))
-          if (discovered.length === 0) return prev
-          return { ...prev, sessions: [...prev.sessions, ...discovered] }
+    const sync = () => {
+      if (document.visibilityState !== "visible") return
+      fetch("/api/terminal/sessions")
+        .then((r) => (r.ok ? r.json() : { sessions: [] }))
+        .then((data: { sessions?: { id: string; alive: boolean; title?: string }[] }) => {
+          if (cancelled) return
+          const live = (data.sessions ?? []).filter((s) => s.alive)
+          const titles = new Map(live.map((s) => [s.id, s.title]))
+          setState((prev) => {
+            let changed = false
+            const known = new Set(prev.sessions.map((s) => s.id))
+            const updated = prev.sessions.map((s) => {
+              const title = titles.get(s.id)
+              if (!title || title === s.label) return s
+              changed = true
+              return { ...s, label: title }
+            })
+            const discovered = live
+              .filter((s) => !known.has(s.id))
+              .map((s) => ({ id: s.id, label: s.title ?? "bash" }))
+            if (!changed && discovered.length === 0) return prev
+            return { ...prev, sessions: [...updated, ...discovered] }
+          })
         })
-      })
-      .catch(() => {
-        /* no server session list available — keep local tabs as-is */
-      })
+        .catch(() => {
+          /* no server session list available — keep local tabs as-is */
+        })
+    }
+    sync()
+    const timer = tab === "terminal" ? setInterval(sync, 4000) : null
     return () => {
       cancelled = true
+      if (timer) clearInterval(timer)
     }
-  }, [])
+  }, [tab])
 
   const addSession = useCallback(() => {
     setState((prev) => {
@@ -212,7 +228,7 @@ export function ConsoleShell() {
         <div className={tab === "terminal" ? "" : "hidden"}>
           {visited.has("terminal") && <div>
             {/* Session tab strip */}
-            <div className="flex items-end gap-0 mb-0">
+            <div className="flex items-end gap-0 mb-0 overflow-x-auto">
               {sessions.map((session) => {
                 const isActive = session.id === activeSessionId
                 return (
@@ -227,12 +243,16 @@ export function ConsoleShell() {
                     onClick={() => setActiveSessionId(session.id)}
                   >
                     <TerminalSquare className="w-3 h-3 shrink-0" />
-                    <span>{session.label}</span>
+                    <span className="max-w-[14rem] truncate" title={session.label}>{session.label}</span>
                     {sessions.length > 1 && (
                       <button
                         onClick={(e) => { e.stopPropagation(); closeSession(session.id) }}
-                        className="ml-0.5 flex items-center justify-center w-3.5 h-3.5 rounded opacity-0 group-hover:opacity-100 hover:bg-zinc-700 transition-all"
+                        className={cn(
+                          "ml-0.5 flex items-center justify-center w-3.5 h-3.5 rounded hover:bg-zinc-700 transition-all",
+                          isActive ? "opacity-60 hover:opacity-100" : "opacity-0 group-hover:opacity-100",
+                        )}
                         title="Close session"
+                        aria-label={`Close ${session.label}`}
                       >
                         <X className="w-2.5 h-2.5" />
                       </button>
