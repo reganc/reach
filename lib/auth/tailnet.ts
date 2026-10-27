@@ -23,8 +23,14 @@
  * - **trusted** — `127.0.0.1:$PORT`. Reachable only by processes on this box
  *   and by Tailscale Serve, which proxies from loopback after authenticating
  *   the peer at the WireGuard layer and stamping its identity headers.
- * - **public** — `0.0.0.0:$REACH_PUBLIC_PORT`. The LAN, and Tailscale Funnel's
- *   proxy target for the public internet. Never admin, full stop.
+ * - **lan** — the public socket, when the TCP peer is inside `REACH_LAN_CIDRS`
+ *   (see `lib/auth/lan.ts`). Devices on the home network, connecting directly.
+ *   Admin is allowed on session + ADMIN role alone — the same posture reach had
+ *   before it was ever exposed off-box — so the LAN works without a Tailscale
+ *   client.
+ * - **public** — the public socket, any other peer. Chiefly Tailscale Funnel's
+ *   proxy target for the public internet (Funnel connects from loopback, so it
+ *   can never classify as lan). Never admin, full stop.
  *
  * `server.ts` stamps `x-reach-ingress` from the listening socket and overwrites
  * whatever the client sent, so unlike an `X-Forwarded-*` heuristic it cannot be
@@ -50,7 +56,7 @@
 type HeaderLookup = (name: string) => string | undefined
 
 /** Which listening socket a request arrived on. See "Ingress classes" above. */
-export type Ingress = "trusted" | "public"
+export type Ingress = "trusted" | "lan" | "public"
 
 /**
  * Server-stamped ingress class. Always overwritten by `server.ts` on the way
@@ -58,7 +64,7 @@ export type Ingress = "trusted" | "public"
  */
 export const INGRESS_HEADER = "x-reach-ingress"
 
-/** Identity headers Tailscale Serve injects — stripped on public ingress. */
+/** Identity headers Tailscale Serve injects — stripped on lan/public ingress. */
 export const TAILSCALE_IDENTITY_HEADERS = [
   "tailscale-user-login",
   "tailscale-user-name",
@@ -126,10 +132,13 @@ function isDirectLoopback(get: HeaderLookup): boolean {
 /**
  * Decide whether a request may reach the admin surface.
  *
- * - Public ingress (LAN / Funnel) → reject, unconditionally. This is checked
- *   before the allowlist so that an empty `REACH_TAILNET_ADMIN_LOGINS` cannot
- *   hand a shell to the internet: turning the allowlist off is a decision about
- *   which *tailnet users* to trust, never a decision to trust the LAN.
+ * - LAN ingress → allow. The tailnet identity factor doesn't apply to a device
+ *   that never touched the tailnet; session + ADMIN role still gate it.
+ * - Public ingress (Funnel / anything off-LAN) → reject, unconditionally. This
+ *   is checked before the allowlist so that an empty
+ *   `REACH_TAILNET_ADMIN_LOGINS` cannot hand a shell to the internet: turning
+ *   the allowlist off is a decision about which *tailnet users* to trust, never
+ *   a decision to trust the internet.
  * - No allowlist configured → gate is off, allow (trusted ingress only).
  * - Identity present → must be on the allowlist.
  * - Identity absent, request came through a proxy → reject. Fails closed if the
@@ -140,7 +149,9 @@ function isDirectLoopback(get: HeaderLookup): boolean {
  *   there is nothing left to protect at that point.
  */
 function check(get: HeaderLookup): boolean {
-  if (get(INGRESS_HEADER) !== "trusted") return false
+  const ingress = get(INGRESS_HEADER)
+  if (ingress === "lan") return true
+  if (ingress !== "trusted") return false
 
   const allowed = allowedLogins()
   if (allowed.length === 0) return true

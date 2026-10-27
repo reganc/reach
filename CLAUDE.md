@@ -41,12 +41,14 @@ non-loopback interface (any LAN client can claim `X-Forwarded-For: 127.0.0.1`).
 | Ingress | Socket | How you get there | Admin surface |
 |---|---|---|---|
 | **trusted** | `127.0.0.1:3000` | on-box; tailnet via `tailscale serve --https=8444` → `https://comet.taild00e4a.ts.net:8444` | **yes** (subject to the identity allowlist) |
-| **public** | `0.0.0.0:3199` | LAN `http://10.0.0.49:3199`; internet via `tailscale funnel --https=443` → `https://comet.taild00e4a.ts.net` | **no** — refused |
+| **lan** | `0.0.0.0:3199`, peer in `REACH_LAN_CIDRS` | LAN `http://10.0.0.49:3199` — no Tailscale client needed | **yes** (password + ADMIN role, no tailnet identity) |
+| **public** | `0.0.0.0:3199`, any other peer | internet via `tailscale funnel --https=443` → `https://comet.taild00e4a.ts.net` | **no** — refused |
 
 "Admin surface" = `/console`, `/files`, `/admin`, `/insights`, `/portfolio`,
 `/api/console/*`, `/api/files/*`, `/api/projects/*`, `/api/users/*`, and the
 terminal HTTP + WebSocket endpoints in `server.ts`. Public ingress gets login,
-the launcher, and nothing else; `components/nav.tsx` hides the admin links there
+the launcher, and nothing else (LAN ingress is classified by TCP peer address
+in `lib/auth/lan.ts`, which can't be forged the way a header can); `components/nav.tsx` hides the admin links there
 rather than showing links that bounce.
 
 **Config invariant — Funnel must target the public port, never 3000.** Funnel

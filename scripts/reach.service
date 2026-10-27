@@ -36,7 +36,8 @@ Environment=HOST=127.0.0.1
 # the public internet (`tailscale funnel --bg --https=443
 # http://127.0.0.1:3199` → https://comet.taild00e4a.ts.net). Login and the app
 # launcher work here; /console, /files, /admin, /insights and the terminal
-# WebSocket are refused outright.
+# WebSocket are refused outright — except for peers inside REACH_LAN_CIDRS
+# (set in .env.local), which get the full app on password + ADMIN role.
 #
 # Funnel MUST point at this port and never at PORT above: Funnel proxies from
 # loopback and carries no tailnet identity, so a funnel aimed at the trusted
