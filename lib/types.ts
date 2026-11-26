@@ -7,7 +7,11 @@ export interface App {
   color: string
   createdAt: Date
   updatedAt: Date
+  status?: LauncherStatus | null
 }
+
+/** A launcher card's dot: the bot's hub level, "down", or "dead" for a link that doesn't open. */
+export type LauncherStatus = "info" | "warn" | "alert" | "down" | "dead"
 
 export interface User {
   id: string
