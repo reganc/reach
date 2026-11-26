@@ -27,7 +27,7 @@ npm run db:studio            # Prisma Studio GUI
 
 ## Architecture
 
-**Reach** is a self-hosted app portal. Authenticated users see a grid of app cards; clicking one opens the app in a full-screen iframe overlay. Admins manage apps and user accounts.
+**Reach** is a self-hosted app portal. Authenticated users see a grid of app cards (from `~/apps/fleet.yaml`, see below); clicking one opens the app in a full-screen iframe overlay. Admins manage apps and user accounts.
 
 ### Remote access (two listeners, two trust levels)
 
@@ -95,6 +95,21 @@ app/
       resources/              — system, gpu, containers, summary
       tokens/                 — Claude usage summary + per-project breakdown
 ```
+
+### Launcher and the app hub (`lib/hub/`)
+- **The launcher's list is `~/apps/fleet.yaml`** (`FLEET_FILE`), the same list the grok bot (llm-app)
+  uses; contract in `~/apps/HUB.md`. `apps` report status, `links` are launcher-only. `ui` is
+  `http://localhost:<port>` (rewritten per visitor by `lib/apps/viewer-url.ts`; the LAN address
+  changes, so never store it). **Private apps are never on the launcher**: login is on the internet.
+- Entries added in `/admin` still show, under "More", unless fleet.yaml covers the same host:port.
+  They and `links` get a grey dot and are dimmed when they don't open (`probe.ts`: no answer, or 404/410).
+- Dots on apps that report come from the bot's `GET /v1/hub` (`status.ts`, needs `LLM_API_KEY`,
+  60 s cache). Only the level is used, never item text: not every account is an admin.
+- **reach's own card**: `instrumentation.ts` → `schedule.ts` writes `~/apps/.hub/reach.json`
+  (`HUB_DIR`) at start and every 30 min: disk/memory/GPU pressure, restarting or unhealthy
+  containers, launcher links that don't open (`card.ts`, pure and tested). Never token cost.
+  `REACH_HUB_CARD=off` stops it. The Node-only import in `instrumentation.ts` must stay inside the
+  `NEXT_RUNTIME === "nodejs"` check, or the edge build fails on `node:` modules.
 
 ### Console (admin)
 - Discovers docker-compose apps under `/home/regan/apps` (configurable via `APPS_BASE_PATH`)
